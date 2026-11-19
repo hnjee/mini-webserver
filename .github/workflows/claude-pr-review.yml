@@ -1,0 +1,58 @@
+# PR이 열리거나 커밋이 추가되면 Claude가 C 코드를 리뷰함
+name: Claude PR 코드 리뷰
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+    paths:
+      - "src/**"
+      - "include/**"
+      - "tests/**"
+      - "Makefile"
+      - "CMakeLists.txt"
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            이 저장소는 POSIX 소켓만으로 만드는 C 웹 서버(+ Reverse/Forward Proxy) 과제임.
+            `gh pr diff`로 바뀐 부분만 보고 아래 기준으로 리뷰해.
+
+            [꼭 볼 것]
+            1. 메모리: malloc/free 짝, 버퍼 오버플로, 경계 검사, 해제 후 사용, 누수
+            2. 소켓·자원: fd 닫기, 에러·연결 끊김 경로에서의 자원 회수, EINTR·부분 read/write 처리
+            3. HTTP: 요청 라인·헤더·본문 경계, Content-Length, keep-alive, 잘못된 요청(400/404/405/413/414/500)
+            4. 동시성: 데이터 경쟁, 락 순서, 스레드 풀·이벤트 루프 블로킹
+            5. 시그널: SIGPIPE 무시, SIGINT/SIGTERM 안전 종료, 시그널 핸들러 안 async-signal-safe
+            6. 프록시: 백엔드 무응답·타임아웃, 라우팅 규칙, 라운드로빈
+            7. 테스트: 새 동작에 단위 테스트가 있는지
+
+            [작성 방법]
+            - 문제는 해당 줄에 인라인 코멘트로 남겨 (mcp__github_inline_comment__create_inline_comment)
+            - 각 지적: 문제 / 근거 / 수정안 / 심각도(🔴 꼭 고칠 것, 🟡 고치면 좋은 것, 🟢 사소한 것)
+            - 마지막에 `gh pr comment`로 요약 1개를 남겨 (심각도별 개수, 핵심 3줄)
+            - 근거 없는 지적, 취향 문제는 쓰지 마. 모든 글은 한국어 해요체로 써.
+          claude_args: |
+            --model claude-opus-5-5
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
