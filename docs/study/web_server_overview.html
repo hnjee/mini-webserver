@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>웹서버 한눈에 보기</title>
+<style>
+:root{
+  --bg:#f7f6f2;--card:#fff;--text:#1f1f1d;--muted:#7a7972;--line:#e2e0d8;
+  --app:#EEEDFE;--app-s:#7F77DD;--app-t:#3C3489;
+  --sock:#FAEEDA;--sock-s:#BA7517;--sock-t:#633806;
+  --kern:#E1F5EE;--kern-s:#1D9E75;--kern-t:#085041;
+  --req:#D85A30;--res:#185FA5;--sys:#888780;
+}
+@media (prefers-color-scheme: dark){:root{
+  --bg:#1b1b19;--card:#252523;--text:#ecebe6;--muted:#a3a19a;--line:#3a3936;
+  --app:#2a2747;--app-s:#AFA9EC;--app-t:#CECBF6;
+  --sock:#3a2c14;--sock-s:#EF9F27;--sock-t:#FAC775;
+  --kern:#12352c;--kern-s:#5DCAA5;--kern-t:#9FE1CB;
+  --req:#F0997B;--res:#85B7EB;--sys:#B4B2A9;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:"Pretendard","Apple SD Gothic Neo","Noto Sans KR",system-ui,sans-serif}
+.wrap{max-width:960px;margin:0 auto;padding:36px 20px 60px}
+h1{font-size:26px;font-weight:600;margin:0 0 20px}
+h2{font-size:19px;font-weight:600;margin:44px 0 14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}
+.modes{display:flex;gap:8px;margin-bottom:12px}
+.btn{font:inherit;font-size:14px;border:1px solid var(--line);background:var(--card);color:var(--text);padding:7px 14px;border-radius:8px;cursor:pointer}
+.btn.on{background:var(--text);color:var(--bg);border-color:var(--text)}
+.btn:disabled{opacity:.35;cursor:default}
+svg{width:100%;height:auto;display:block}
+.L{stroke-width:1;transition:stroke-width .2s}
+.L.app{fill:var(--app);stroke:var(--app-s)} .L.sock{fill:var(--sock);stroke:var(--sock-s)} .L.kern{fill:var(--kern);stroke:var(--kern-s)}
+.L.on{stroke-width:3.5}
+.ln{font-size:16px;font-weight:600} .ls{font-size:12.5px}
+.app-t{fill:var(--app-t)} .sock-t{fill:var(--sock-t)} .kern-t{fill:var(--kern-t)}
+.hd{font-size:16px;font-weight:600;fill:var(--text)}
+.wire{stroke:var(--line);stroke-width:2;stroke-dasharray:6 5}
+#pkt{transition:transform .55s ease}
+#pkt rect{transition:fill .3s}
+#pkt text{fill:#fff;font-size:13px;font-weight:600}
+.cap{font-size:20px;font-weight:600;text-align:center;margin:14px 0 4px;min-height:30px}
+.ctrl{display:flex;justify-content:center;align-items:center;gap:8px;margin-top:10px}
+.no{font-size:13px;color:var(--muted);min-width:52px;text-align:center}
+.legend{display:flex;justify-content:center;gap:16px;font-size:13px;color:var(--muted);margin-top:8px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.layers{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+@media(max-width:720px){.layers{grid-template-columns:1fr}}
+.ly{border-radius:12px;padding:16px;border:1.5px solid}
+.ly b{font-size:17px;display:block}
+.ly .who{font-size:13px;opacity:.8;margin-bottom:10px}
+.ly .do{font-size:15px;line-height:1.55}
+.ly .hw{font-size:13px;margin-top:10px;padding-top:10px;border-top:1px dashed currentColor;opacity:.9}
+.ly.app{background:var(--app);border-color:var(--app-s);color:var(--app-t)}
+.ly.sock{background:var(--sock);border-color:var(--sock-s);color:var(--sock-t)}
+.ly.kern{background:var(--kern);border-color:var(--kern-s);color:var(--kern-t)}
+.px{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:720px){.px{grid-template-columns:1fr}}
+.px .card b{font-size:16px}
+.px .flow{font-size:14px;color:var(--muted);margin:6px 0 8px}
+.px .why{font-size:15px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>웹서버 한눈에 보기</h1>
+
+<div class="card">
+  <div class="modes">
+    <button class="btn on" id="m0">직접 연결</button>
+    <button class="btn" id="m1">리버스 프록시 거쳐서</button>
+  </div>
+  <svg id="sv" viewBox="0 0 900 340"></svg>
+  <div class="cap" id="cap"></div>
+  <div class="ctrl">
+    <button class="btn" id="bp">←</button>
+    <button class="btn" id="bplay">▶ 재생</button>
+    <button class="btn" id="bn">→</button>
+    <span class="no" id="no"></span>
+  </div>
+  <div class="legend"><span><i style="background:var(--req)"></i>요청</span><span><i style="background:var(--res)"></i>응답</span><span><i style="background:var(--sys)"></i>연결 준비</span></div>
+</div>
+
+<h2>세 계층, 누가 뭘 하나</h2>
+<div class="layers">
+  <div class="ly app"><b>HTTP</b><div class="who">내 코드</div>
+    <div class="do">요청 글자를 읽고 뜻을 해석<br>응답 글자를 형식대로 작성</div>
+    <div class="hw">과제: ② 파싱 · ③ 파일/CGI · ④ 응답 · 프록시 전달</div></div>
+  <div class="ly sock"><b>소켓 API</b><div class="who">내 코드 ↔ OS 사이 창구</div>
+    <div class="do">"연결 받아 줘", "보내 줘", "온 거 줘"<br>라고 OS에 부탁</div>
+    <div class="hw">과제: ① 소켓 서버 · ⑤ 동시 처리</div></div>
+  <div class="ly kern"><b>TCP/IP</b><div class="who">OS가 알아서</div>
+    <div class="do">잘게 쪼개 배달하고, 순서 맞춰 조립<br>잃어버리면 다시 보냄</div>
+    <div class="hw">과제: 직접 구현 X, 동작만 이해</div></div>
+</div>
+
+<h2>프록시는 왜 쓰나</h2>
+<div class="px">
+  <div class="card"><b>Forward Proxy</b>
+    <div class="flow">클라이언트 → 프록시 → 외부 서버</div>
+    <div class="why">클라이언트를 대신해 밖으로 나감<br>→ 접속 차단 · 캐싱 · IP 숨김</div></div>
+  <div class="card"><b>Reverse Proxy</b>
+    <div class="flow">클라이언트 → 프록시 → 내부 서버 여러 대</div>
+    <div class="why">서버를 대신해 손님을 맞음<br>→ 부하 분산 · 경로별 라우팅 · 보안</div></div>
+</div>
+
+</div>
+<script>
+const LY = ['app','sock','kern'];
+const LYN = {app:'HTTP',sock:'소켓 API',kern:'TCP/IP'};
+const Y = {app:70,sock:150,kern:230}, H = 64; let W = 200;
+
+const MODES = [
+  { stacks:[{x:80,name:'클라이언트',sub:{app:'curl / 브라우저',sock:'',kern:'OS'}},
+            {x:620,name:'웹 서버',sub:{app:'내 코드',sock:'',kern:'OS'}}],
+    steps:[] },
+  { stacks:[{x:45,name:'클라이언트',sub:{app:'curl / 브라우저',sock:'',kern:'OS'}},
+            {x:360,name:'리버스 프록시',sub:{app:'내 코드',sock:'',kern:'OS'}},
+            {x:675,name:'백엔드 서버',sub:{app:'',sock:'',kern:'OS'}}],
+    steps:[] }
+];
+
+const at = (s,l,k,cap,lab)=>({s,l,k,cap,lab});
+const cross = (a,b,k,cap,lab)=>({w:[a,b],k,cap,lab});
+const R='req', S='res', Z='sys';
+
+MODES[0].steps = [
+  at(1,'sock',Z,'서버가 8080번 포트를 열고 기다린다','listen'),
+  cross(0,1,Z,'연결 맺기 (3-way handshake)','SYN/ACK'),
+  at(0,'app',R,'요청 글자를 만든다','GET /'),
+  at(0,'sock',R,'write() — "보내 줘"','GET /'),
+  at(0,'kern',R,'OS가 쪼개서 포장','GET /'),
+  cross(0,1,R,'네트워크를 건넌다','GET /'),
+  at(1,'kern',R,'서버 OS가 받아서 조립','GET /'),
+  at(1,'sock',R,'read() — 꺼내 간다','GET /'),
+  at(1,'app',R,'요청을 해석하고 파일을 찾는다','GET /'),
+  at(1,'app',S,'응답 글자를 만든다','200 OK'),
+  at(1,'sock',S,'write() — 같은 연결로 "보내 줘"','200 OK'),
+  at(1,'kern',S,'OS가 쪼개서 포장','200 OK'),
+  cross(1,0,S,'네트워크를 거꾸로 건넌다','200 OK'),
+  at(0,'kern',S,'클라이언트 OS가 조립','200 OK'),
+  at(0,'sock',S,'read() — 꺼내 간다','200 OK'),
+  at(0,'app',S,'화면에 그린다','200 OK')
+];
+
+MODES[1].steps = [
+  at(1,'sock',Z,'프록시(8080)와 백엔드(8001)가 기다린다','listen'),
+  cross(0,1,Z,'클라이언트 ↔ 프록시 연결','SYN/ACK'),
+  at(0,'app',R,'요청 글자를 만든다','GET /api'),
+  at(0,'sock',R,'write()','GET /api'),
+  at(0,'kern',R,'OS가 포장','GET /api'),
+  cross(0,1,R,'프록시에 도착','GET /api'),
+  at(1,'kern',R,'프록시 OS가 조립','GET /api'),
+  at(1,'sock',R,'read()','GET /api'),
+  at(1,'app',R,'해석하고 보낼 곳을 고른다 (/api → 8001)','GET /api'),
+  cross(1,2,Z,'백엔드에 새로 연결 — 이번엔 프록시가 클라이언트','SYN/ACK'),
+  at(1,'sock',R,'write() — 백엔드 쪽 연결로','GET /api'),
+  at(1,'kern',R,'OS가 포장','GET /api'),
+  cross(1,2,R,'백엔드에 도착','GET /api'),
+  at(2,'kern',R,'백엔드 OS가 조립','GET /api'),
+  at(2,'sock',R,'read()','GET /api'),
+  at(2,'app',S,'처리하고 응답을 만든다','200 OK'),
+  at(2,'sock',S,'write()','200 OK'),
+  at(2,'kern',S,'OS가 포장','200 OK'),
+  cross(2,1,S,'프록시로 돌아온다','200 OK'),
+  at(1,'kern',S,'프록시 OS가 조립','200 OK'),
+  at(1,'sock',S,'read()','200 OK'),
+  at(1,'app',S,'응답 확인 (필요하면 캐싱)','200 OK'),
+  at(1,'sock',S,'write() — 클라이언트 쪽 연결로','200 OK'),
+  at(1,'kern',S,'OS가 포장','200 OK'),
+  cross(1,0,S,'클라이언트로 돌아온다','200 OK'),
+  at(0,'kern',S,'OS가 조립','200 OK'),
+  at(0,'sock',S,'read()','200 OK'),
+  at(0,'app',S,'화면에 그린다 — 백엔드는 몰라도 됨','200 OK')
+];
+
+const sv = document.getElementById('sv');
+let mi = 0, i = 0, timer = null;
+
+function draw(){
+  const m = MODES[mi];
+  W = mi===0 ? 200 : 180;
+  let h = '';
+  for(let k=0;k<m.stacks.length-1;k++){
+    const a=m.stacks[k], b=m.stacks[k+1];
+    h += `<line class="wire" x1="${a.x+W}" y1="${Y.kern+H/2}" x2="${b.x}" y2="${Y.kern+H/2}"/>`;
+  }
+  m.stacks.forEach((s,si)=>{
+    h += `<text class="hd" x="${s.x+W/2}" y="44" text-anchor="middle">${s.name}</text>`;
+    LY.forEach(l=>{
+      h += `<rect class="L ${l}" id="r${si}${l}" x="${s.x}" y="${Y[l]}" width="${W}" height="${H}" rx="10"/>`;
+      const sub = s.sub[l];
+      h += `<text class="ln ${l}-t" x="${s.x+W/2}" y="${Y[l]+(sub?28:37)}" text-anchor="middle">${LYN[l]}</text>`;
+      if(sub) h += `<text class="ls ${l}-t" x="${s.x+W/2}" y="${Y[l]+47}" text-anchor="middle">${sub}</text>`;
+    });
+  });
+  h += `<g id="pkt"><rect x="-52" y="-15" width="104" height="30" rx="15"/><text x="0" y="5" text-anchor="middle" id="pt"></text></g>`;
+  sv.innerHTML = h;
+}
+
+function show(){
+  const m = MODES[mi], st = m.steps[i];
+  sv.querySelectorAll('.L').forEach(r=>r.classList.remove('on'));
+  let x, y;
+  if(st.w){
+    const a=m.stacks[st.w[0]], b=m.stacks[st.w[1]];
+    const ax = st.w[0]<st.w[1] ? a.x+W : a.x, bx = st.w[0]<st.w[1] ? b.x : b.x+W;
+    x = (ax+bx)/2; y = Y.kern+H/2;
+  } else {
+    const s=m.stacks[st.s];
+    y = Y[st.l]+H/2;
+    document.getElementById('r'+st.s+st.l).classList.add('on');
+  }
+  const pkt = document.getElementById('pkt');
+  pkt.style.transform = `translate(${x}px,${y}px)`;
+  pkt.querySelector('rect').style.fill = st.k==='req'?'var(--req)':st.k==='res'?'var(--res)':'var(--sys)';
+  document.getElementById('pt').textContent = st.lab;
+  document.getElementById('cap').textContent = st.cap;
+  document.getElementById('no').textContent = `${i+1} / ${m.steps.length}`;
+  document.getElementById('bp').disabled = i===0;
+  document.getElementById('bn').disabled = i===m.steps.length-1;
+}
+
+function stop(){ clearInterval(timer); timer=null; document.getElementById('bplay').textContent='▶ 재생'; }
+function play(){
+  if(i===MODES[mi].steps.length-1){ i=0; show(); }
+  document.getElementById('bplay').textContent='❚❚ 정지';
+  timer = setInterval(()=>{
+    if(i<MODES[mi].steps.length-1){ i++; show(); } else stop();
+  }, 1500);
+}
+function setMode(k){
+  stop(); mi=k; i=0;
+  document.getElementById('m0').classList.toggle('on',k===0);
+  document.getElementById('m1').classList.toggle('on',k===1);
+  draw(); show();
+}
+document.getElementById('m0').onclick=()=>setMode(0);
+document.getElementById('m1').onclick=()=>setMode(1);
+document.getElementById('bn').onclick=()=>{ stop(); if(i<MODES[mi].steps.length-1){i++;show();} };
+document.getElementById('bp').onclick=()=>{ stop(); if(i>0){i--;show();} };
+document.getElementById('bplay').onclick=()=> timer?stop():play();
+document.addEventListener('keydown',e=>{
+  if(e.key==='ArrowRight') document.getElementById('bn').click();
+  if(e.key==='ArrowLeft') document.getElementById('bp').click();
+  if(e.key===' '){ e.preventDefault(); document.getElementById('bplay').click(); }
+});
+setMode(0);
+</script>
+</body>
+</html>
