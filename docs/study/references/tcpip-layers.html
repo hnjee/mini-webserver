@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TCP/IP 4계층 — 데이터는 어떻게 이동하나</title>
+<style>
+:root{
+  --bg:#f7f6f2;--card:#fff;--text:#1f1f1d;--muted:#7a7972;--line:#d9d7cf;
+  --ap:#EEEDFE;--ap-s:#534AB7;--ap-t:#3C3489;
+  --tr:#FAEEDA;--tr-s:#854F0B;--tr-t:#633806;
+  --in:#E1F5EE;--in-s:#0F6E56;--in-t:#085041;
+  --li:#E6F1FB;--li-s:#185FA5;--li-t:#0C447C;
+  --hl:#D85A30;
+}
+@media (prefers-color-scheme: dark){:root{
+  --bg:#1b1b19;--card:#252523;--text:#ecebe6;--muted:#a3a19a;--line:#45443f;
+  --ap:#2a2747;--ap-s:#AFA9EC;--ap-t:#CECBF6;
+  --tr:#3a2c14;--tr-s:#EF9F27;--tr-t:#FAC775;
+  --in:#12352c;--in-s:#5DCAA5;--in-t:#9FE1CB;
+  --li:#10304f;--li-s:#85B7EB;--li-t:#B5D4F4;
+  --hl:#F0997B;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:"Pretendard","Apple SD Gothic Neo","Noto Sans KR",system-ui,sans-serif}
+.wrap{max-width:960px;margin:0 auto;padding:36px 20px 60px}
+h1{font-size:26px;font-weight:600;margin:0 0 20px}
+h2{font-size:19px;font-weight:600;margin:40px 0 12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}
+svg{width:100%;height:auto;display:block}
+.L{stroke-width:1;transition:stroke-width .2s}
+.L.ap{fill:var(--ap);stroke:var(--ap-s)} .L.tr{fill:var(--tr);stroke:var(--tr-s)}
+.L.in{fill:var(--in);stroke:var(--in-s)} .L.li{fill:var(--li);stroke:var(--li-s)}
+.L.on{stroke-width:4}
+.ghost{fill:none;stroke:var(--line);stroke-width:1.5;stroke-dasharray:6 5}
+.gt{font-size:13px;fill:var(--muted)}
+.ln{font-size:15px;font-weight:600} .ls{font-size:12px}
+.ap-t{fill:var(--ap-t)} .tr-t{fill:var(--tr-t)} .in-t{fill:var(--in-t)} .li-t{fill:var(--li-t)}
+.hd{font-size:16px;font-weight:600;fill:var(--text)}
+.wire{stroke:var(--muted);stroke-width:2;fill:none}
+#dot{transition:transform .5s ease}
+#dot circle{fill:var(--hl)}
+.cap{font-size:20px;font-weight:600;text-align:center;margin:16px 0 2px;min-height:30px}
+.sub{font-size:15px;color:var(--muted);text-align:center;min-height:22px}
+/* packet */
+.pk{display:flex;justify-content:center;align-items:stretch;margin:18px 0 6px;min-height:86px}
+.seg{overflow:hidden;max-width:300px;opacity:1;transition:max-width .45s ease, opacity .35s ease, padding .45s ease, margin .45s ease;
+  padding:8px 10px;border:1.5px solid;margin:0 -1.5px 0 0;white-space:nowrap;font-size:12.5px;line-height:1.45;display:flex;flex-direction:column;justify-content:center}
+.seg b{font-size:13.5px}
+.seg.off{max-width:0;opacity:0;padding-left:0;padding-right:0;border-width:0;margin:0}
+.s-li{background:var(--li);border-color:var(--li-s);color:var(--li-t)}
+.s-in{background:var(--in);border-color:var(--in-s);color:var(--in-t)}
+.s-tr{background:var(--tr);border-color:var(--tr-s);color:var(--tr-t)}
+.s-ap{background:var(--ap);border-color:var(--ap-s);color:var(--ap-t)}
+.seg.sealed{opacity:.35;filter:grayscale(1)}
+.seg.first{border-radius:10px 0 0 10px} .seg.last{border-radius:0 10px 10px 0}
+.seg.flash{animation:fl .6s}
+@keyframes fl{0%{box-shadow:0 0 0 0 var(--hl)}50%{box-shadow:0 0 0 4px var(--hl)}100%{box-shadow:0 0 0 0 transparent}}
+.pklab{text-align:center;font-size:13px;color:var(--muted)}
+.ctrl{display:flex;justify-content:center;align-items:center;gap:8px;margin-top:14px}
+.btn{font:inherit;font-size:14px;border:1px solid var(--line);background:var(--card);color:var(--text);padding:7px 14px;border-radius:8px;cursor:pointer}
+.btn:disabled{opacity:.35;cursor:default}
+.no{font-size:13px;color:var(--muted);min-width:52px;text-align:center}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:760px){.two{grid-template-columns:1fr}}
+.card h3{margin:0 0 10px;font-size:16px}
+.card ul{margin:0;padding-left:20px;line-height:1.7;font-size:15px}
+table{width:100%;border-collapse:collapse;font-size:15px}
+td{padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:none}
+.tag{display:inline-block;font-size:12.5px;font-weight:600;padding:1px 8px;border-radius:999px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>TCP/IP 4계층 — 데이터는 어떻게 이동하나</h1>
+
+<div class="card">
+  <svg id="sv" viewBox="0 0 900 400"></svg>
+  <div class="cap" id="cap"></div>
+  <div class="sub" id="sub"></div>
+
+  <div class="pk" id="pk">
+    <div class="seg s-li first" id="g-eh"><b>이더넷 헤더</b><span id="t-eh"></span></div>
+    <div class="seg s-in" id="g-ip"><b>IP 헤더</b><span>10.0.0.2 → 203.0.113.7</span><span id="t-ttl"></span></div>
+    <div class="seg s-tr" id="g-tcp"><b>TCP 헤더</b><span>포트 52000 → 8080</span><span>순서 번호 1</span></div>
+    <div class="seg s-ap" id="g-data"><b>HTTP 데이터</b><span>GET /index.html</span><span>Host: ...</span></div>
+    <div class="seg s-li last" id="g-et"><b>꼬리</b><span>오류 검사</span></div>
+  </div>
+  <div class="pklab">↑ 지금 이 지점에서 데이터의 모양</div>
+
+  <div class="ctrl">
+    <button class="btn" id="bf">처음</button>
+    <button class="btn" id="bp">← 이전</button>
+    <button class="btn" id="bn">다음 →</button>
+    <span class="no" id="no"></span>
+  </div>
+</div>
+
+<h2>라우터는 왜 끝까지 안 올라가나</h2>
+<div class="two">
+  <div class="card">
+    <h3>라우터의 일은 "어느 쪽으로 보낼까"뿐</h3>
+    <ul>
+      <li>그 판단에는 <b>도착 IP 주소</b>만 있으면 충분</li>
+      <li>그래서 인터넷 계층까지만 열어 보고 바로 내려보냄</li>
+      <li>덕분에 <b>빠르고</b>, 안에 든 게 HTTP든 게임이든 <b>상관없이</b> 중계</li>
+      <li>TCP 연결, HTTP 해석은 <b>양 끝 컴퓨터만</b> 함 → 우리가 만드는 웹서버의 일</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>구간을 지날 때 바뀌는 것 / 그대로인 것</h3>
+    <table>
+      <tr><td><span class="tag s-li">MAC 주소</span></td><td>구간마다 <b>새로</b> 씀<br><span style="color:var(--muted);font-size:13.5px">바로 다음 칸까지만 유효</span></td></tr>
+      <tr><td><span class="tag s-in">IP 주소</span></td><td>처음부터 끝까지 <b>그대로</b><br><span style="color:var(--muted);font-size:13.5px">TTL만 1씩 줄어듦</span></td></tr>
+      <tr><td><span class="tag s-tr">TCP</span> <span class="tag s-ap">HTTP</span></td><td>라우터는 <b>열지도 않음</b></td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="card" style="margin-top:12px">
+  <h3>이 과제와의 연결</h3>
+  <ul>
+    <li>라우터는 인터넷 계층까지만 올라가지만, <b>프록시는 HTTP 계층까지 올라가서</b> 내용을 읽고 판단해요. 그래서 경로(<code>/api</code>)를 보고 라우팅할 수 있어요.</li>
+    <li>웹서버 코드는 맨 위 HTTP 데이터만 다뤄요. 그 아래 봉투들은 OS가 씌우고 벗겨 줘요.</li>
+  </ul>
+</div>
+
+</div>
+<script>
+const W=200, H=56;
+const Y={ap:40,tr:106,in:172,li:238};
+const NAME={ap:'응용',tr:'전송',in:'인터넷',li:'링크'};
+const PROTO={ap:'HTTP',tr:'TCP',in:'IP',li:'이더넷 · 선'};
+const X={A:40,R:350,B:660};
+const WIRE_Y=340;
+
+function draw(){
+  let h='';
+  [['A','컴퓨터 A (클라이언트)'],['R','라우터'],['B','컴퓨터 B (웹서버)']].forEach(([k,n])=>{
+    h+=`<text class="hd" x="${X[k]+W/2}" y="26" text-anchor="middle">${n}</text>`;
+    ['ap','tr','in','li'].forEach(l=>{
+      if(k==='R' && (l==='ap'||l==='tr')) return;
+      h+=`<rect class="L ${l}" id="r${k}${l}" x="${X[k]}" y="${Y[l]}" width="${W}" height="${H}" rx="10"/>`;
+      h+=`<text class="ln ${l}-t" x="${X[k]+W/2-14}" y="${Y[l]+25}" text-anchor="middle">${NAME[l]}</text>`;
+      h+=`<text class="ls ${l}-t" x="${X[k]+W/2-14}" y="${Y[l]+43}" text-anchor="middle">${PROTO[l]}</text>`;
+    });
+  });
+  h+=`<rect class="ghost" x="${X.R}" y="${Y.ap}" width="${W}" height="${Y.tr+H-Y.ap}" rx="10"/>`;
+  h+=`<text class="gt" x="${X.R+W/2}" y="${Y.ap+52}" text-anchor="middle">전송 · 응용</text>`;
+  h+=`<text class="gt" x="${X.R+W/2}" y="${Y.ap+72}" text-anchor="middle">올라가지 않음</text>`;
+  const bot=Y.li+H;
+  [['A','R'],['R','B']].forEach(([a,b])=>{
+    h+=`<path class="wire" d="M${X[a]+W/2} ${bot} V${WIRE_Y} H${X[b]+W/2} V${bot}"/>`;
+  });
+  h+=`<text class="gt" x="${(X.A+X.R+W)/2}" y="${WIRE_Y+24}" text-anchor="middle">구간 1</text>`;
+  h+=`<text class="gt" x="${(X.R+X.B+W)/2}" y="${WIRE_Y+24}" text-anchor="middle">구간 2</text>`;
+  h+=`<g id="dot"><circle r="9"/></g>`;
+  document.getElementById('sv').innerHTML=h;
+}
+
+const E1='aa:aa(A) → rr:01(라우터)', E2='rr:02(라우터) → bb:bb(B)';
+const S=[
+  {at:['A','ap'], p:{data:1}, cap:'HTTP가 보낼 내용을 만든다', sub:'아직 주소도 포장도 없는 순수한 내용'},
+  {at:['A','tr'], p:{data:1,tcp:1}, cap:'TCP 헤더를 붙인다', sub:'포트 번호 = 상대 컴퓨터 안의 어느 프로그램에게?', fx:'tcp'},
+  {at:['A','in'], p:{data:1,tcp:1,ip:64}, cap:'IP 헤더를 붙인다', sub:'IP 주소 = 어느 컴퓨터에게? 최종 목적지 B', fx:'ip'},
+  {at:['A','li'], p:{data:1,tcp:1,ip:64,eth:E1}, cap:'이더넷 헤더를 붙인다', sub:'MAC 주소 = 바로 다음 칸에게. B가 아니라 라우터!', fx:'eth'},
+  {at:['w1'], p:{data:1,tcp:1,ip:64,eth:E1}, cap:'신호로 바뀌어 선을 탄다', sub:'구간 1: A → 라우터'},
+  {at:['R','li'], p:{data:1,tcp:1,ip:64}, cap:'라우터: 이더넷 봉투를 벗긴다', sub:'도착 MAC이 내 것 → 받는다. 이 봉투의 역할은 끝'},
+  {at:['R','in'], p:{data:1,tcp:1,ip:63}, cap:'라우터: 도착 IP만 보고 길을 고른다', sub:'TTL 64 → 63. 흐리게 보이는 TCP · HTTP는 열지 않는다', fx:'ip'},
+  {at:['R','li'], p:{data:1,tcp:1,ip:63,eth:E2}, cap:'라우터: 새 이더넷 봉투를 씌운다', sub:'MAC은 새로, IP는 처음 그대로', fx:'eth'},
+  {at:['w2'], p:{data:1,tcp:1,ip:63,eth:E2}, cap:'다음 구간으로', sub:'실제 인터넷에선 이걸 라우터 수십 개에서 반복'},
+  {at:['B','li'], p:{data:1,tcp:1,ip:63}, cap:'B: 이더넷 봉투를 벗긴다', sub:'도착 MAC이 내 것'},
+  {at:['B','in'], p:{data:1,tcp:1}, cap:'B: IP 봉투를 벗긴다', sub:'도착 IP가 내 것 = 최종 목적지 도착'},
+  {at:['B','tr'], p:{data:1}, cap:'B: TCP 봉투를 벗긴다', sub:'포트 8080 → 웹서버 프로그램에게. 조각을 순서대로 조립'},
+  {at:['B','ap'], p:{data:1}, cap:'웹서버가 read()로 받는다', sub:'A가 처음 만든 내용 그대로'}
+];
+
+let i=0;
+function pos(at){
+  if(at[0]==='w1') return [(X.A+X.R+W)/2, WIRE_Y];
+  if(at[0]==='w2') return [(X.R+X.B+W)/2, WIRE_Y];
+  return [X[at[0]]+W-22, Y[at[1]]+H/2];
+}
+function show(){
+  const s=S[i];
+  document.querySelectorAll('.L').forEach(r=>r.classList.remove('on'));
+  if(s.at.length===2) document.getElementById('r'+s.at[0]+s.at[1]).classList.add('on');
+  const [x,y]=pos(s.at);
+  document.getElementById('dot').style.transform=`translate(${x}px,${y}px)`;
+  const p=s.p;
+  const set=(id,on)=>document.getElementById(id).classList.toggle('off',!on);
+  set('g-eh',!!p.eth); set('g-et',!!p.eth); set('g-ip',!!p.ip); set('g-tcp',!!p.tcp); set('g-data',!!p.data);
+  ['g-tcp','g-data'].forEach(id=>document.getElementById(id).classList.toggle('sealed', s.at[0]==='R'));
+  if(p.eth) document.getElementById('t-eh').textContent=p.eth;
+  if(p.ip) document.getElementById('t-ttl').textContent='TTL '+p.ip;
+  ['g-data','g-tcp','g-ip','g-eh','g-et'].forEach(id=>document.getElementById(id).classList.remove('first','last'));
+  const vis=['g-eh','g-ip','g-tcp','g-data','g-et'].filter(id=>!document.getElementById(id).classList.contains('off'));
+  document.getElementById(vis[0]).classList.add('first');
+  document.getElementById(vis[vis.length-1]).classList.add('last');
+  if(s.fx){
+    const ids=s.fx==='eth'?['g-eh','g-et']:['g-'+s.fx];
+    ids.forEach(id=>{const e=document.getElementById(id);e.classList.remove('flash');void e.offsetWidth;e.classList.add('flash');});
+  }
+  document.getElementById('cap').textContent=s.cap;
+  document.getElementById('sub').textContent=s.sub;
+  document.getElementById('no').textContent=`${i+1} / ${S.length}`;
+  document.getElementById('bp').disabled=i===0;
+  document.getElementById('bf').disabled=i===0;
+  document.getElementById('bn').disabled=i===S.length-1;
+}
+document.getElementById('bn').onclick=()=>{if(i<S.length-1){i++;show();}};
+document.getElementById('bp').onclick=()=>{if(i>0){i--;show();}};
+document.getElementById('bf').onclick=()=>{i=0;show();};
+document.addEventListener('keydown',e=>{
+  if(e.key==='ArrowRight')document.getElementById('bn').click();
+  if(e.key==='ArrowLeft')document.getElementById('bp').click();
+});
+draw(); show();
+</script>
+</body>
+</html>
