@@ -1,0 +1,22 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug server",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/server",
+            "args": ["-p", "8080", "-r", "./www"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                { "description": "Enable pretty-printing for gdb", "text": "-enable-pretty-printing", "ignoreFailures": true },
+                { "description": "SIGPIPE에서 멈추지 않기", "text": "handle SIGPIPE nostop noprint pass", "ignoreFailures": true }
+            ],
+            "preLaunchTask": "Build server"
+        }
+    ]
+}
