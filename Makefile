@@ -18,7 +18,7 @@ TEST_BINS := $(TEST_SRCS:$(TEST_DIR)/%.c=$(BUILD_DIR)/%)
 # DESIGN.md Step 0: ./webserver -p 8080 -r ./www
 TARGET := webserver
 
-.PHONY: all debug asan test run www clean
+.PHONY: all debug asan test test-debug run www clean
 
 all: $(TARGET)
 
@@ -40,6 +40,11 @@ debug: LDFLAGS += -fsanitize=address,undefined
 debug: all
 
 asan: debug
+
+# 단위 테스트도 ASan·UBSan을 켜고 빌드해서 실행. 일반 빌드와 섞이지 않게 clean 후 사용
+test-debug: CFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
+test-debug: LDFLAGS += -fsanitize=address,undefined
+test-debug: test
 
 test: $(TEST_BINS)
 	@for t in $(TEST_BINS); do echo "== $$t"; ./$$t || exit 1; done

@@ -12,3 +12,4 @@ POSIX 소켓만으로 만드는 HTTP 서버 과제.
 - `make debug` ASan·UBSan 빌드
 - `make www` 테스트 파일(large.bin, secret.txt) 만들기
 - `make test` 단위 테스트 전체 실행
+- `make test-debug` ASan·UBSan을 켜고 단위 테스트 실행
