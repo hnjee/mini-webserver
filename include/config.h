@@ -16,7 +16,7 @@ enum config_result {
     CONFIG_ERR_ROOT    /* 루트가 없거나 디렉터리가 아님 */
 };
 
-/* 출력하거나 exit()하지 않고 결과 코드만 돌려준다 */
+/* argv에서 -p, -r, -c를 꺼내 out->port, out->root, out->config_path에 채운다 */
 enum config_result config_parse(int argc, char *argv[], struct server_config *out);
 
 /* 사용법을 표준 에러에 출력한다 */

@@ -7,7 +7,7 @@ Step 1 서버는 리슨 소켓 하나로 클라이언트를 한 명씩 받아, �
 | ID | 유형 | 요구사항 | 확인 명령어 | 기대 결과 |
 | --- | --- | --- | --- | --- |
 | S1-01 | socket | 서버는 시작할 때 `socket()`으로 IPv4·TCP 리슨 소켓 하나만 만들어야 한다. | 서버를 띄운 채 `ls -l /proc/$(pgrep -n webserver)/fd \| grep -c socket` | `1` (0, 1, 2 다음 번호인 3번에 `socket:[숫자]` 줄이 있다) |
-| S1-02 | socket | `socket()`이 실패하면(fd가 0 미만이면), 서버는 이유를 출력하고 종료 코드 1로 끝나야 한다. | `(ulimit -n 3; ./webserver -p 8080 -r ./www); echo "exit=$?"` | `socket: Too many open files`가 출력되고, `exit=1`이 나오고, `ss -ltn \| grep 8080`에 아무것도 없다 |
+| S1-02 | socket | `socket()`이 실패하면(fd가 0 미만이면), 서버는 이유를 출력하고 종료 코드 1로 끝나야 한다. | `strace -o /dev/null -e inject=socket:error=EMFILE ./webserver -p 8081 -r ./www; echo "exit=$?"` | `socket: Too many open files`가 출력되고, `exit=1`이 나오고, `ss -ltn \| grep 8081`에 아무것도 없다 |
 | S1-03 | setsockopt | 서버는 `bind()` 전에 리슨 소켓에 `SO_REUSEADDR`을 켜서, 서버를 끈 뒤 1분 안에 다시 켜도 `bind()`가 실패하지 않아야 한다. | 터미널 1: 서버 실행<br>터미널 2: `nc localhost 8080` (접속 유지)<br>터미널 1: Ctrl+C → `ss -tan \| grep 8080` → 바로 서버 다시 실행 | `TIME-WAIT` 줄이 보이는데도 `listening on 8080`이 나온다 |
 | S1-04 | setsockopt | `setsockopt()`가 실패하면, 서버는 이유를 출력하고 소켓을 닫은 뒤 종료 코드 1로 끝나야 한다. | 코드 리뷰 | 실패 경로에 `perror("setsockopt")`와 `close(fd)`가 있고 종료 코드 1로 끝난다 |
 | S1-05 | bind | 서버는 리슨 소켓에 모든 IP 주소와 `-p`로 받은 포트 번호를 붙여야 한다. | 서버를 띄운 채 `ss -ltn \| grep 8080` | `0.0.0.0:8080`이 나온다 |

@@ -1,5 +1,7 @@
 #include "config.h"
+#include "server.h"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -27,6 +29,16 @@ int main(int argc, char *argv[])
         printf("config: %s\n", cfg.config_path);
     }
 
-    /* 소켓은 Step 1에서 연다 */
-    return EXIT_SUCCESS;
+    /* 끊긴 클라이언트에 write()해도 서버가 죽지 않고 -1(EPIPE)을 받게 함 */
+    signal(SIGPIPE, SIG_IGN);
+
+    int listen_fd = server_listen(cfg.port);
+    if (listen_fd < 0)
+        return EXIT_FAILURE;
+
+    printf("listening on %d\n", cfg.port);
+    fflush(stdout);
+
+    server_run(listen_fd);
+    return EXIT_SUCCESS;   /* 도달하지 않음 */
 }
