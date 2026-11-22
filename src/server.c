@@ -10,7 +10,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <time.h>
 #include <unistd.h>
 
 #define BUF_SIZE 4096
@@ -78,23 +77,13 @@ int serve_client(int client_fd)
     }
 }
 
-static void sleep_briefly(void)
-{
-    struct timespec ts = { 0, 100L * 1000 * 1000 };   /* 0.1초 */
-    nanosleep(&ts, NULL);
-}
-
 void server_run(int listen_fd)
 {
     for (;;) {
         int client_fd = accept(listen_fd, NULL, NULL);
         if (client_fd < 0) {
-            int err = errno;
-            if (err == EINTR)
-                continue;
-            perror("accept");
-            if (err == EMFILE || err == ENFILE)
-                sleep_briefly();
+            if (errno != EINTR)
+                perror("accept");
             continue;
         }
 

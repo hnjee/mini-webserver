@@ -110,23 +110,13 @@ int server_listen(int port)
 `accept()`가 실패해도 서버를 끝내지 않고 1번으로 돌아가요.
 
 ```c
-static void sleep_briefly(void)
-{
-    struct timespec ts = { 0, 100L * 1000 * 1000 };   /* 0.1초 */
-    nanosleep(&ts, NULL);
-}
-
 void server_run(int listen_fd)
 {
     for (;;) {
         int client_fd = accept(listen_fd, NULL, NULL);
         if (client_fd < 0) {
-            int err = errno;
-            if (err == EINTR)
-                continue;
-            perror("accept");
-            if (err == EMFILE || err == ENFILE)
-                sleep_briefly();
+            if (errno != EINTR)
+                perror("accept");
             continue;
         }
 
@@ -279,7 +269,7 @@ int serve_client(int client_fd);
 #endif
 ```
 
-`server.c`에 필요한 헤더는 `<arpa/inet.h>`, `<errno.h>`, `<netinet/in.h>`, `<stdio.h>`, `<string.h>`, `<sys/socket.h>`, `<time.h>`, `<unistd.h>`예요. `main.c`에는 `<signal.h>`와 `"server.h"`를 더해요.
+`server.c`에 필요한 헤더는 `<arpa/inet.h>`, `<errno.h>`, `<netinet/in.h>`, `<stdio.h>`, `<string.h>`, `<sys/socket.h>`, `<unistd.h>`예요. `main.c`에는 `<signal.h>`와 `"server.h"`를 더해요.
 
 ## 테스트 방법
 

@@ -112,7 +112,7 @@ FT-20에서 서버에 찍히는 메시지는 끊긴 시점에 따라 `write: Bro
 | CR-01 | S1-04 | `setsockopt()` 실패 경로에 `perror("setsockopt")`와 `close(fd)`가 있고 `-1`을 돌려준다 |
 | CR-02 | S1-11 | `listen()` 실패 경로에 `perror("listen")`과 `close(fd)`가 있고 `-1`을 돌려준다 |
 | CR-03 | S1-16 | `accept()`가 `EINTR`이면 출력 없이 다시 부른다 |
-| CR-04 | S1-17 | `accept()`가 그 밖의 이유로 실패하면 `perror("accept")` 후 다시 부르고, `EMFILE`·`ENFILE`이면 0.1초 쉰다. `exit`나 `return`이 없다 |
+| CR-04 | S1-17 | `accept()`가 그 밖의 이유로 실패하면 `perror("accept")` 후 다시 부른다. `exit`나 `return`이 없다 |
 | CR-05 | S1-21 | `read()`가 `EINTR`이면 다시 부른다 |
 | CR-06 | S1-26 | `write()`가 `EINTR`이면 남은 부분을 다시 쓴다 |
 | CR-07 | S1-32 | `close()`가 실패하면 `perror("close")`만 하고 다시 닫지 않는다 |
