@@ -2,5 +2,15 @@
 __pycache__/
 .DS_Store
 
+# AI 전용 지침·메모 (로컬 전용)
+AGENTS.md
+.agent/
 
-docs/study/learning-progress.md
+# 빌드 산출물
+/webserver
+/webserver-debug
+/tests/test_options
+*.dSYM/
+
+# make fixtures로 생성하는 큰 테스트 파일
+/www/large.bin
