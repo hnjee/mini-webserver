@@ -9,7 +9,7 @@
 
 | Step | 결과 | 마지막 검증일 | 비고 |
 | ---- | ---- | ------------- | ---- |
-| [Step 0](./steps/step-0-setup/README.md) | ⬜ | - | - |
+| [Step 0](./steps/step-0-setup/README.md) | ✅ 통과 | 2026-11-23 | 최종 판본 TC-0-01/02·시험 폴더 경로 독립 실행 통과. 22개 단위 검사·ASan·getopt는 변경 없는 코드의 이전 증거 재사용. |
 | [Step 1](./steps/step-1-echo/README.md) | ⬜ | - | - |
 | [Step 2](./steps/step-2-http-parse/README.md) | ⬜ | - | - |
 | [Step 3](./steps/step-3-static/README.md) | ⬜ | - | - |

@@ -24,14 +24,14 @@
 
 ## 공통 환경
 
-- 포트 `8080`, 정적 루트 `./www`
+- 포트 `8080`. Step 0의 인자 수용 TC는 `./www`를 사용하고, 실제 파일 시험은 Linux 컨테이너에서 `make fixtures`로 준비한 `~/mini-webserver-www`를 정적 루트로 사용한다.
 - 백엔드 `8001`, `8002` (Step 6)
 
 ## Step별 현황
 
 | Step | TC 수 | 종류 | 통과 | 실패 |
 | ---- | ----- | ---- | ---- | ---- |
-| [Step 0](./steps/step-0-setup/README.md) | 2 | 수동 | 0 | 0 |
+| [Step 0](./steps/step-0-setup/README.md) | 2 | 수동 | 2 (최종 Linux 판본) | 0 |
 | [Step 1](./steps/step-1-echo/README.md) | 2 | 기능 | 0 | 0 |
 | [Step 2](./steps/step-2-http-parse/README.md) | 4 | 기능, 단위 | 0 | 0 |
 | [Step 3](./steps/step-3-static/README.md) | 5 | 기능, 단위 | 0 | 0 |

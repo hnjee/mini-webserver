@@ -13,12 +13,13 @@ flowchart LR
     classDef doing fill:#E6F1FB,stroke:#185FA5,color:#042C53
     classDef done fill:#EAF3DE,stroke:#3B6D11,color:#173404
     classDef blocked fill:#FCEBEB,stroke:#A32D2D,color:#501313
-    class S0,S1,S2,S3,S4,S5,S6,S7,S8 todo
+    class S0 done
+    class S1,S2,S3,S4,S5,S6,S7,S8 todo
 ```
 
 | Step | 내용 | 요구사항 | 일정 | 상태 | 문서 |
 | ---- | ---- | -------- | ---- | ---- | ---- |
-| 0 | 공통 준비 | T-01 | 11/21 (토) | ⬜ 시작 전 | [Step 0](./steps/step-0-setup/README.md) · [결정](./steps/step-0-setup/decision.md) |
+| 0 | 공통 준비 | T-01 (라우팅 설정은 Step 6) | 11/21 (토) | ✅ 완료 | [Step 0](./steps/step-0-setup/README.md) · [결정](./steps/step-0-setup/decision.md) |
 | 1 | TCP 에코 서버 | R-01 | 11/21 (토) | ⬜ 시작 전 | [Step 1](./steps/step-1-echo/README.md) · [결정](./steps/step-1-echo/decision.md) |
 | 2 | HTTP 요청 파싱 + 고정 응답 | R-02, R-03, Q-03 | 11/23 (월) | ⬜ 시작 전 | [Step 2](./steps/step-2-http-parse/README.md) · [결정](./steps/step-2-http-parse/decision.md) |
 | 3 | 정적 파일 서빙 | R-04 | 11/23 (월) | ⬜ 시작 전 | [Step 3](./steps/step-3-static/README.md) · [결정](./steps/step-3-static/decision.md) |
@@ -30,8 +31,8 @@ flowchart LR
 
 ## 지금
 
-- 다음 행동: Step 0 시작 (`Makefile`, 실행 인자, `www/` 테스트 파일)
-- 막힌 것: 없음
+- 다음 구현 단위: Step 1 TCP 에코 서버.
+- 막힌 것: Step 0 기술 범위에는 없음. 프록시 라우팅 인자(`-c`)는 Step 6에서 추가한다.
 
 ## 기준선
 

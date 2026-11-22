@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mini-webserver 테스트 페이지</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <h1>mini-webserver</h1>
+  <p id="status">정적 파일 서빙 확인용 페이지다.</p>
+  <ul>
+    <li><a href="/style.css">style.css</a> — text/css</li>
+    <li><a href="/app.js">app.js</a> — text/javascript</li>
+    <li><a href="/image.png">image.png</a> — image/png</li>
+    <li><a href="/photo.jpg">photo.jpg</a> — image/jpeg</li>
+    <li><a href="/large.bin">large.bin</a> — 수 MB 바이너리</li>
+    <li><a href="/secret.txt">secret.txt</a> — 읽기 권한 없음(403 확인용)</li>
+    <li><a href="/no-such-file">no-such-file</a> — 없는 경로(404 확인용)</li>
+  </ul>
+  <script src="/app.js"></script>
+</body>
+</html>
