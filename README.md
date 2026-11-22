@@ -16,6 +16,7 @@ mini-webserver/
 ├── README.md                  이 문서
 ├── DESIGN.md                  팀 공통 설계 (Step 0~8, 완료 기준)
 └── docs/
+    ├── README.md              문서 안내 (찾고 싶은 것으로 찾기)
     ├── assignment.md          과제 원문
     ├── technical-writing-principles.md   문서 작성 기준
     ├── progress.md            전체 진행 현황
