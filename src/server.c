@@ -1,5 +1,8 @@
 #include "server.h"
 
+#include "request.h"
+#include "response.h"
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -10,54 +13,72 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define ECHO_BUF_SIZE 4096
+/* 정상 요청에 보내는 고정 본문. 파일 서빙은 Step 3에서 붙인다 */
+static const char HELLO_BODY[] = "<h1>Hello, world!</h1>";
 
 /*
- * buf의 len바이트를 fd에 끝까지 쓴다. 성공하면 0, 실패하면 -1.
- * write()는 요청한 것보다 적게 쓰고 돌아올 수 있어서, 남은 만큼 반복한다.
+ * 연결 하나에서 HTTP 요청 하나를 처리하고 client_fd를 닫는다.
+ *   1. 버퍼에 이어 붙이며 "\r\n\r\n"이 나올 때까지 read()를 반복한다
+ *      (한 번의 read()로 요청이 다 온다고 가정하지 않는다)
+ *   2. 헤더를 파싱해 400·501·505를 판정한다
+ *   3. 정상이면 고정 HTML로 200, 아니면 에러 응답을 보낸다
+ * 헤더 뒤에 딸려 온 바이트는 Step 2에서는 버린다 (Step 4에서 다음 요청으로 쓴다).
  */
-static int write_all(int fd, const char *buf, size_t len)
+static void handle_http(int client_fd)
 {
-    size_t sent = 0;
+    char buf[REQUEST_BUF_SIZE];
+    size_t len = 0;
+    ssize_t end;
+    struct http_request req;
+    int status;
+    int rc;
 
-    while (sent < len) {
-        ssize_t n = write(fd, buf + sent, len - sent);
-        if (n < 0) {
-            if (errno == EINTR)   /* 시그널 때문에 끊겼을 뿐이니 다시 쓴다 */
-                continue;
-            return -1;
-        }
-        sent += (size_t)n;
-    }
-    return 0;
-}
-
-/*
- * 연결 하나를 처리한다. 상대가 끊거나 에러가 나면 client_fd를 닫고 돌아온다.
- *   read() > 0  : 읽은 n바이트만 그대로 돌려준다
- *   read() == 0 : 상대가 연결을 끊었다 (EOF)
- *   read() < 0  : EINTR이면 다시 읽고, 그 밖에는 연결을 끝낸다
- */
-static void handle_echo(int client_fd)
-{
-    char buf[ECHO_BUF_SIZE];
-
+    /* 1. 헤더 끝까지 읽기 */
     for (;;) {
-        ssize_t n = read(client_fd, buf, sizeof(buf));
-        if (n > 0) {
-            if (write_all(client_fd, buf, (size_t)n) < 0) {
-                perror("write");
-                break;
-            }
-        } else if (n == 0) {
+        end = request_find_end(buf, len);
+        if (end >= 0)
             break;
+        if (len == sizeof(buf)) {
+            /* 버퍼가 가득 찼는데 헤더가 끝나지 않았다 */
+            if (send_error(client_fd, 431) < 0)
+                perror("write");
+            printf("request:   (header too large) -> 431\n");
+            close(client_fd);
+            return;
+        }
+
+        ssize_t n = read(client_fd, buf + len, sizeof(buf) - len);
+        if (n > 0) {
+            len += (size_t)n;
+        } else if (n == 0) {
+            /* 요청을 다 보내기 전에 상대가 끊었다. 응답할 대상이 없다 */
+            close(client_fd);
+            return;
         } else {
             if (errno == EINTR)
                 continue;
             perror("read");
-            break;
+            close(client_fd);
+            return;
         }
     }
+
+    /* 2. 파싱과 판정. req의 문자열은 buf 안을 가리키므로 응답까지 buf를 건드리지 않는다 */
+    status = parse_request(buf, (size_t)end, &req);
+
+    /* 3. 응답 */
+    if (status == 0) {
+        status = 200;
+        rc = send_response(client_fd, status, "text/html",
+                           HELLO_BODY, sizeof(HELLO_BODY) - 1);
+    } else {
+        rc = send_error(client_fd, status);
+    }
+    if (rc < 0)
+        perror("write");
+
+    printf("request:   %s %s -> %d\n",
+           req.method ? req.method : "-", req.uri ? req.uri : "-", status);
     close(client_fd);
 }
 
@@ -124,7 +145,7 @@ void server_run(int listen_fd)
         client_port = ntohs(client_addr.sin_port);
 
         printf("connected: %s:%d (fd=%d)\n", ip, client_port, client_fd);
-        handle_echo(client_fd);   /* 끝나면 client_fd를 닫고 돌아온다 */
+        handle_http(client_fd);   /* 끝나면 client_fd를 닫고 돌아온다 */
         printf("closed:    %s:%d\n", ip, client_port);
     }
 }

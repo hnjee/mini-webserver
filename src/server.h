@@ -10,7 +10,7 @@ int server_open(int port);
 
 /*
  * accept()를 반복하며 연결을 하나씩 처리한다. 돌아오지 않는다.
- * Step 1에서는 받은 바이트를 그대로 돌려주는 에코 처리를 한다.
+ * 연결마다 HTTP 요청 하나를 읽고 응답한 뒤 연결을 닫는다 (Step 2).
  */
 void server_run(int listen_fd);
 
