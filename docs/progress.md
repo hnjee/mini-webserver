@@ -13,15 +13,15 @@ flowchart LR
     classDef doing fill:#E6F1FB,stroke:#185FA5,color:#042C53
     classDef done fill:#EAF3DE,stroke:#3B6D11,color:#173404
     classDef blocked fill:#FCEBEB,stroke:#A32D2D,color:#501313
-    class S0,S1 done
-    class S2,S3,S4,S5,S6,S7,S8 todo
+    class S0,S1,S2 done
+    class S3,S4,S5,S6,S7,S8 todo
 ```
 
 | Step | 내용 | 요구사항 | 일정 | 상태 | 문서 |
 | ---- | ---- | -------- | ---- | ---- | ---- |
 | 0 | 공통 준비 | T-01 (라우팅 설정은 Step 6) | 11/21 (토) | ✅ 완료 | [Step 0](./steps/step-0-setup/README.md) · [결정](./steps/step-0-setup/decision.md) |
 | 1 | TCP 에코 서버 | R-01 | 11/21 (토) | ✅ 완료 | [Step 1](./steps/step-1-echo/README.md) · [결정](./steps/step-1-echo/decision.md) |
-| 2 | HTTP 요청 파싱 + 고정 응답 | R-02, R-03, Q-03 | 11/23 (월) | ⬜ 시작 전 | [Step 2](./steps/step-2-http-parse/README.md) · [결정](./steps/step-2-http-parse/decision.md) |
+| 2 | HTTP 요청 파싱 + 고정 응답 | R-02, R-03, Q-03 | 11/23 (월) | ✅ 완료 | [Step 2](./steps/step-2-http-parse/README.md) · [결정](./steps/step-2-http-parse/decision.md) |
 | 3 | 정적 파일 서빙 | R-04 | 11/23 (월) | ⬜ 시작 전 | [Step 3](./steps/step-3-static/README.md) · [결정](./steps/step-3-static/decision.md) |
 | 4 | POST 본문 + keep-alive | R-05, Q-03 | 11/24 (화) | ⬜ 시작 전 | [Step 4](./steps/step-4-post-keepalive/README.md) · [결정](./steps/step-4-post-keepalive/decision.md) |
 | 5 | 동시성 | R-06, Q-02 | 11/24 (화) | ⬜ 시작 전 | [Step 5](./steps/step-5-concurrency/README.md) · [결정](./steps/step-5-concurrency/decision.md) |
@@ -31,7 +31,7 @@ flowchart LR
 
 ## 지금
 
-- 다음 구현 단위: Step 2 HTTP 요청 파싱 + 고정 응답. Step 1은 독립 검증을 통과했다(TC-1-01~10).
+- 다음 구현 단위: Step 3 정적 파일 서빙. Step 2는 독립 검증을 통과했다(TC-2-01~11, 단위 검사 156개).
 - 막힌 것: Step 0 기술 범위에는 없음. 프록시 라우팅 인자(`-c`)는 Step 6에서 추가한다.
 
 ## 기준선

@@ -11,7 +11,7 @@
 | ---- | ---- | ------------- | ---- |
 | [Step 0](./steps/step-0-setup/README.md) | ✅ 통과 | 2026-11-23 | 최종 판본 TC-0-01/02·시험 폴더 경로 독립 실행 통과. 22개 단위 검사·ASan·getopt는 변경 없는 코드의 이전 증거 재사용. |
 | [Step 1](./steps/step-1-echo/README.md) | ✅ 통과 | 2026-11-23 | TC-1-01~10 독립 실행 통과, 단위 검사 29개. 부분 `write`·`EINTR`는 시험이 아닌 코드 검토. |
-| [Step 2](./steps/step-2-http-parse/README.md) | ⬜ | - | - |
+| [Step 2](./steps/step-2-http-parse/README.md) | ✅ 통과 | 2026-11-23 | TC-2-01~11 독립 실행 통과, 단위 검사 156개(전체 `make test`). 30만 건 참조 모델 비교 불일치 0. 부분 `write`·`EINTR`·`read` 오류 경로는 시험이 아닌 코드 검토. |
 | [Step 3](./steps/step-3-static/README.md) | ⬜ | - | - |
 | [Step 4](./steps/step-4-post-keepalive/README.md) | ⬜ | - | - |
 | [Step 5](./steps/step-5-concurrency/README.md) | ⬜ | - | - |

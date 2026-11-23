@@ -33,7 +33,7 @@
 | ---- | ----- | ---- | ---- | ---- |
 | [Step 0](./steps/step-0-setup/README.md) | 2 | 수동 | 2 (최종 Linux 판본) | 0 |
 | [Step 1](./steps/step-1-echo/README.md) | 10 | 기능, 단위 | 10 | 0 |
-| [Step 2](./steps/step-2-http-parse/README.md) | 4 | 기능, 단위 | 0 | 0 |
+| [Step 2](./steps/step-2-http-parse/README.md) | 11 | 기능, 단위 | 11 | 0 |
 | [Step 3](./steps/step-3-static/README.md) | 5 | 기능, 단위 | 0 | 0 |
 | [Step 4](./steps/step-4-post-keepalive/README.md) | 3 | 기능 | 0 | 0 |
 | [Step 5](./steps/step-5-concurrency/README.md) | 2 | 기능, 부하 | 0 | 0 |
