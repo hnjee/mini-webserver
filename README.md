@@ -9,35 +9,34 @@ flowchart LR
     A["DESIGN.md<br/>팀 공통 설계"] --> B["docs/progress.md<br/>전체 진행 현황"] --> C["docs/steps/step-N/<br/>Step별 추적·결정"]
 ```
 
+- 목표: C와 POSIX 소켓으로 웹 서버를 만들고 리버스 프록시까지 확장한다 (Step 0~8).
+- 문서 전체 안내: [docs/README.md](./docs/README.md)
+
+## 알고 싶은 것으로 찾기
+
+| 알고 싶은 것 | 문서 |
+| ------------ | ---- |
+| 지금 어디까지 했나 | [progress.md](./docs/progress.md) |
+| 무엇을 만들어야 하나 | [requirements.md](./docs/requirements.md) |
+| 구조와 설계 선택 | [architecture.md](./docs/architecture.md) |
+| 그 선택을 왜 했나 | [decisions.md](./docs/decisions.md) → Step의 `decision.md` |
+| 테스트가 몇 개이고 몇 개 통과했나 | [test-plan.md](./docs/test-plan.md) |
+| 검증 결과 | [verification.md](./docs/verification.md) |
+| Step별 요구사항·테스트·구현·검증 | `docs/steps/step-N-이름/README.md` |
+| 배경 지식 | [docs/study/](./docs/study/00-overview.md) |
+
 ## 폴더 구조
 
 ```text
 mini-webserver/
-├── README.md                  이 문서
-├── DESIGN.md                  팀 공통 설계 (Step 0~8, 완료 기준)
+├── README.md        이 문서
+├── DESIGN.md        팀 공통 설계 (Step 0~8, 완료 기준)
 └── docs/
-    ├── README.md              문서 안내 (찾고 싶은 것으로 찾기)
-    ├── assignment.md          과제 원문
-    ├── technical-writing-principles.md   문서 작성 기준
-    ├── progress.md            전체 진행 현황
-    ├── requirements.md        요구사항 명세 (ID별 상태)
-    ├── architecture.md        전체 설계 (이 구현의 선택 요약)
-    ├── test-plan.md           테스트 계획
-    ├── verification.md        검증 요약
-    ├── decisions.md           전체 결정 색인
-    ├── steps/
-    │   └── step-N-이름/
-    │       ├── README.md      Step 상황 추적 (요구사항·설계·테스트·구현·검증)
-    │       └── decision.md    Step 결정 기록
-    └── study/                 학습 자료
+    ├── README.md    문서 안내
+    ├── progress.md · requirements.md · architecture.md
+    ├── decisions.md · test-plan.md · verification.md
+    ├── assignment.md                       과제 원문
+    ├── technical-writing-principles.md     문서 작성 기준
+    ├── steps/step-N-이름/                  README.md(진행 추적) · decision.md(결정 기록)
+    └── study/                              학습 자료
 ```
-
-## 문서 역할
-
-| 범위 | 무엇을 | 어디에 |
-| ---- | ------ | ------ |
-| 전체 | 진행 현황 | [progress.md](./docs/progress.md) |
-| 전체 | 요구사항 · 설계 · 테스트 · 검증 | [requirements.md](./docs/requirements.md) · [architecture.md](./docs/architecture.md) · [test-plan.md](./docs/test-plan.md) · [verification.md](./docs/verification.md) |
-| 전체 | 결정 색인 | [decisions.md](./docs/decisions.md) |
-| Step | 상황 추적 | `docs/steps/step-N-이름/README.md` |
-| Step | 결정 기록 | `docs/steps/step-N-이름/decision.md` |
