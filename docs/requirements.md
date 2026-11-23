@@ -12,7 +12,7 @@
 | R-01 | `socket` → `bind` → `listen` → `accept`, 요청·응답 송수신 | [Step 1](./steps/step-1-echo/README.md) | ✅ |
 | R-02 | 요청 라인·헤더(`Host`, `Content-Length`, `Connection`) 파싱 | [Step 2](./steps/step-2-http-parse/README.md) | ✅ |
 | R-03 | 응답 생성: 상태 라인, 표준 헤더, 본문 | [Step 2](./steps/step-2-http-parse/README.md) | ✅ |
-| R-04 | 정적 파일 서빙, MIME 매핑, 404·403·500 | [Step 3](./steps/step-3-static/README.md) | ⬜ |
+| R-04 | 정적 파일 서빙, MIME 매핑, 404·403·500 | [Step 3](./steps/step-3-static/README.md) | ✅ |
 | R-05 | POST 본문(`Content-Length`), keep-alive | [Step 4](./steps/step-4-post-keepalive/README.md) | ⬜ |
 | R-06 | 동시 요청 처리 (fork / 스레드 풀 / I/O 멀티플렉싱) | [Step 5](./steps/step-5-concurrency/README.md) | ⬜ |
 | R-07 | 동적 요청 처리 (백엔드 전달) | [Step 6](./steps/step-6-reverse-proxy/README.md) | ⬜ |

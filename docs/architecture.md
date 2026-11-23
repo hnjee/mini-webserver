@@ -17,7 +17,7 @@
 | 연결별 버퍼 관리 | 8KB 고정 버퍼, 초과 시 400 | [Step 2](./steps/step-2-http-parse/decision.md) (D-10, D-11) |
 | HTTP 버전·`Host` 규칙 | 1.0·1.1 허용, `Host`는 1.1에서만 필수 | [Step 2](./steps/step-2-http-parse/decision.md) (D-13) |
 | 파싱 결과 구조 | 값 복사 + 전체 헤더 목록 (헤더 수 상한은 설계) | [Step 2](./steps/step-2-http-parse/decision.md) |
-| 경로 탈출 방지 · 큰 파일 전송 | 미정 | [Step 3](./steps/step-3-static/decision.md) |
+| 경로 탈출 방지 · 큰 파일 전송 | 문자열 검사 + `realpath` 접두 비교, 64KB 고정 버퍼 조각 전송 (구현 검증 통과) | [Step 3](./steps/step-3-static/decision.md) (D-24, D-25) |
 | 남은 바이트 처리 · 타임아웃 | 미정 | [Step 4](./steps/step-4-post-keepalive/decision.md) |
 | 동시성 방식 | 미정 | [Step 5](./steps/step-5-concurrency/decision.md) |
 | 라우팅 설정 형식 · 백엔드 연결 재사용 | 미정 | [Step 6](./steps/step-6-reverse-proxy/decision.md) |
@@ -34,6 +34,8 @@ Step을 진행하며 실제로 만든 모듈만 추가한다.
 | 듣는 소켓 | `src/listener.c`, `src/listener.h` | `socket`·`SO_REUSEADDR`·`bind`·`listen` | 1 |
 | 에코 | `src/echo.c`, `src/echo.h` | 연결 하나의 읽기·쓰기 에코 (Step 2부터 서버는 호출하지 않고 회귀 시험용으로 유지) | 1 |
 | HTTP 파서 | `src/http_parser.c`, `src/http_parser.h` | 받은 바이트를 요청 구조로 판정(불완전·완료·400·501·505), 소켓 I/O 없음 | 2 |
-| 응답 생성 | `src/http_response.c`, `src/http_response.h` | 상태·본문으로 HTTP 응답을 만들어 끝까지 씀 (`Content-Length` 자동 계산) | 2 |
-| 연결 처리 | `src/http_conn.c`, `src/http_conn.h` | 연결 하나: 8KB 버퍼에 읽기, 파서 호출, 응답 | 2 |
+| 응답 생성 | `src/http_response.c`, `src/http_response.h` | 상태·본문으로 HTTP 응답을 만들어 끝까지 씀 (`Content-Length` 자동 계산). Step 3에서 머리만 쓰는 함수(파일 응답), 상태 응답 함수(오류·301), 301·403·404·500·`Location` 추가 | 2, 3 |
+| 연결 처리 | `src/http_conn.c`, `src/http_conn.h` | 연결 하나: 8KB 버퍼에 읽기, 파서 호출, 결과를 상태 코드로 바꿔 응답, 파일 fd 닫기 | 2, 3 |
+| 정적 파일 | `src/static_file.c`, `src/static_file.h` | 요청 대상 판정(경로 탈출 방지·디렉터리·`index.html`), 파일 열기, 64KB 조각 전송 | 3 |
+| MIME | `src/mime.c`, `src/mime.h` | 확장자로 `Content-Type` 결정(7개, 나머지 `octet-stream`) | 3 |
 | 쓰기 보조 | `src/io.c`, `src/io.h` | 부분 `write`를 이어 쓰는 `io_write_all` | 2 |

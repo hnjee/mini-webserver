@@ -12,7 +12,7 @@
 | [Step 0](./steps/step-0-setup/README.md) | ✅ 통과 | 2026-11-23 | 최종 판본 TC-0-01/02·시험 폴더 경로 독립 실행 통과. 22개 단위 검사·ASan·getopt는 변경 없는 코드의 이전 증거 재사용. |
 | [Step 1](./steps/step-1-echo/README.md) | ✅ 통과 | 2026-11-23 | TC-1-01~10 독립 실행 통과, 단위 검사 29개. 부분 `write`·`EINTR`는 시험이 아닌 코드 검토. |
 | [Step 2](./steps/step-2-http-parse/README.md) | ✅ 통과 | 2026-11-23 | TC-2-01~11 독립 실행 통과, 단위 검사 156개(전체 `make test`). 30만 건 참조 모델 비교 불일치 0. 부분 `write`·`EINTR`·`read` 오류 경로는 시험이 아닌 코드 검토. |
-| [Step 3](./steps/step-3-static/README.md) | ⬜ | - | - |
+| [Step 3](./steps/step-3-static/README.md) | ✅ 통과 | 2026-11-23 | TC-3-01~19 독립 실행 통과(Mavuika, 최종 소스 해시 일치), 단위 검사 412건(전체 `make test`, ASan, 비root), 빌드 경고 0건. 변이 시험 23개 중 18개를 시험이 잡았고 나머지는 주입 시험·설계상 이중 방어로 확인. 머리 전송 뒤 실패 경로는 `read`·`close` 주입 시험으로 확인. 스크린샷은 눈으로 판정하지 못하고 DOM 계산 스타일·JS 실행·이미지 크기로 판정. |
 | [Step 4](./steps/step-4-post-keepalive/README.md) | ⬜ | - | - |
 | [Step 5](./steps/step-5-concurrency/README.md) | ⬜ | - | - |
 | [Step 6](./steps/step-6-reverse-proxy/README.md) | ⬜ | - | - |

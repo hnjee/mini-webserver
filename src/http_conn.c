@@ -3,46 +3,49 @@
 #include "http_conn.h"
 #include "http_parser.h"
 #include "http_response.h"
+#include "static_file.h"
 
 #include <errno.h>
-#include <string.h>
 #include <unistd.h>
 
-/* 판정 결과별 고정 응답(D-18 본문 제안). 요청 대상과 관계없이 같다. */
-static int respond(int fd, http_parse_result result)
+static http_conn_result done(int rc)
 {
-    static const char *const content_type = "text/plain; charset=utf-8";
-    int status;
-    const char *body;
-
-    switch (result) {
-    case HTTP_PARSE_OK:
-        status = 200;
-        body = "Hello from mini-webserver\n";
-        break;
-    case HTTP_PARSE_NOT_IMPLEMENTED:
-        status = 501;
-        body = "501 Not Implemented\n";
-        break;
-    case HTTP_PARSE_VERSION_NOT_SUPPORTED:
-        status = 505;
-        body = "505 HTTP Version Not Supported\n";
-        break;
-    case HTTP_PARSE_BAD_REQUEST:
-    default:
-        status = 400;
-        body = "400 Bad Request\n";
-        break;
-    }
-    return http_response_send(fd, status, content_type, body, strlen(body));
+    return rc == 0 ? HTTP_CONN_RESPONDED : HTTP_CONN_ERROR;
 }
 
-http_conn_result http_conn_serve(int fd)
+/* D-30 3·4단계: static_file 결과를 상태 코드로 바꾸고, 200이면 머리 → 본문 → 파일 fd 닫기(D-33). */
+static http_conn_result serve_file(int fd, const char *root, const char *target)
+{
+    static_file file;
+    int rc, err;
+
+    switch (static_file_open(root, target, &file)) {
+    case STATIC_FILE_OK: break;
+    case STATIC_FILE_REDIRECT: return done(http_response_send_status(fd, 301, file.location));
+    case STATIC_FILE_BAD_TARGET: return done(http_response_send_status(fd, 400, NULL));
+    case STATIC_FILE_FORBIDDEN: return done(http_response_send_status(fd, 403, NULL));
+    case STATIC_FILE_NOT_FOUND: return done(http_response_send_status(fd, 404, NULL));
+    case STATIC_FILE_ERROR:
+    default: return done(http_response_send_status(fd, 500, NULL));
+    }
+    rc = http_response_send_head(fd, 200, file.content_type, file.size, NULL);
+    if (rc == 0) {
+        rc = static_file_send_body(fd, &file);
+    }
+    /* 성공한 close도 errno를 바꿀 수 있으므로 원래 실패 이유를 되돌린다. 다 보낸 뒤의 close 실패는 무시한다. */
+    err = errno;
+    close(file.fd);
+    errno = err;
+    return done(rc);
+}
+
+http_conn_result http_conn_serve(int fd, const char *root)
 {
     char buffer[HTTP_REQUEST_HEAD_MAX];
     http_request request;
     http_parse_result result;
     size_t len = 0;
+    int status;
 
     /* 파서는 len < HTTP_REQUEST_HEAD_MAX에서만 INCOMPLETE를 돌려주므로 남은 칸은 항상 1 이상이다(D-15, D-19). */
     for (;;) {
@@ -62,5 +65,14 @@ http_conn_result http_conn_serve(int fd)
             break;
         }
     }
-    return respond(fd, result) == 0 ? HTTP_CONN_RESPONDED : HTTP_CONN_ERROR;
+    if (result == HTTP_PARSE_OK) {
+        return serve_file(fd, root, request.target); /* GET·POST를 같이 처리한다(D-37) */
+    }
+    switch (result) {
+    case HTTP_PARSE_NOT_IMPLEMENTED: status = 501; break;
+    case HTTP_PARSE_VERSION_NOT_SUPPORTED: status = 505; break;
+    case HTTP_PARSE_BAD_REQUEST:
+    default: status = 400; break;
+    }
+    return done(http_response_send_status(fd, status, NULL)); /* HEAD도 501 + 본문(D-44) */
 }

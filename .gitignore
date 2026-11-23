@@ -14,6 +14,8 @@ AGENTS.md
 /tests/test_http_parser
 /tests/test_http_response
 /tests/test_http_conn
+/tests/test_mime
+/tests/test_static_file
 /experiments/bind_no_reuse
 /.build-platform
 *.dSYM/

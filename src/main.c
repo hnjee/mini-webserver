@@ -1,9 +1,9 @@
 /*
- * Step 2: HTTP 요청 파싱 + 고정 응답.
- * 인자를 확인하고 듣는 소켓을 연 뒤, 연결을 하나씩 받아 요청 하나에 고정 응답 하나를 보내고 닫는다.
+ * Step 3: 정적 파일 서빙.
+ * 인자를 확인하고 루트를 정규화하고 듣는 소켓을 연 뒤, 연결을 하나씩 받아 요청 하나에 응답 하나를 보내고 닫는다.
  * 서버는 Ctrl+C(기본 동작)로만 끝난다. 정상 종료 처리는 Step 7이다.
  */
-#define _DEFAULT_SOURCE /* accept(2)의 ENONET 등 Linux 오류 코드 */
+#define _DEFAULT_SOURCE /* accept(2)의 ENONET 등 Linux 오류 코드, realpath */
 
 #include "http_conn.h"
 #include "listener.h"
@@ -43,6 +43,7 @@ int main(int argc, char *argv[])
     char error[256];
     options_status status;
     int listen_fd;
+    char *root;
 
     status = options_parse(argc, argv, &config, error, sizeof(error));
     if (status == OPTIONS_HELP) {
@@ -55,6 +56,13 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    /* D-30: 루트를 한 번 정규화한다. 이 문자열은 프로세스 수명 동안 쓰므로 해제하지 않는다. */
+    root = realpath(config.root, NULL);
+    if (root == NULL) {
+        fprintf(stderr, "오류: 루트 %s 를 정규화할 수 없다: %s\n", config.root, strerror(errno));
+        return EXIT_FAILURE;
+    }
+
     /* D-05: 끊긴 연결에 쓰면 프로세스가 죽지 않고 write가 EPIPE로 실패하게 한다. */
     signal(SIGPIPE, SIG_IGN);
 
@@ -63,8 +71,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "오류: %s\n", error);
         return EXIT_FAILURE;
     }
-    printf("HTTP 서버 시작: 0.0.0.0:%d (루트 %s는 Step 3부터 사용). Ctrl+C로 종료\n",
-           config.port, config.root);
+    printf("HTTP 서버 시작: 0.0.0.0:%d, 루트 %s. Ctrl+C로 종료\n", config.port, root);
     fflush(stdout);
 
     /* 한 번에 한 연결씩 처리한다. 동시성은 Step 5다. */
@@ -78,7 +85,7 @@ int main(int argc, char *argv[])
             close(listen_fd);
             return EXIT_FAILURE;
         }
-        if (http_conn_serve(conn_fd) == HTTP_CONN_ERROR) {
+        if (http_conn_serve(conn_fd, root) == HTTP_CONN_ERROR) {
             fprintf(stderr, "연결 오류로 닫음: %s\n", strerror(errno));
         }
         close(conn_fd);

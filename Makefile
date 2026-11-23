@@ -11,9 +11,12 @@ DEBUG_LDFLAGS = -fsanitize=address
 
 TARGET      = webserver
 DEBUG_TARGET = webserver-debug
-SRC         = src/main.c src/options.c src/listener.c src/http_conn.c src/http_parser.c src/http_response.c src/io.c
-HDR         = src/options.h src/listener.h src/http_conn.h src/http_parser.h src/http_response.h src/io.h
-TEST_TARGETS = tests/test_options tests/test_echo tests/test_http_parser tests/test_http_response tests/test_http_conn
+SRC         = src/main.c src/options.c src/listener.c src/http_conn.c src/http_parser.c src/http_response.c src/io.c \
+              src/static_file.c src/mime.c
+HDR         = src/options.h src/listener.h src/http_conn.h src/http_parser.h src/http_response.h src/io.h \
+              src/static_file.h src/mime.h
+TEST_TARGETS = tests/test_options tests/test_echo tests/test_http_parser tests/test_http_response tests/test_http_conn \
+               tests/test_mime tests/test_static_file
 EXPERIMENT  = experiments/bind_no_reuse
 
 WWW        = www
@@ -45,6 +48,8 @@ test: $(TEST_TARGETS)
 	./tests/test_http_parser
 	./tests/test_http_response
 	./tests/test_http_conn
+	./tests/test_mime
+	./tests/test_static_file
 
 tests/test_options: tests/test_options.c src/options.c src/options.h $(BUILD_STAMP)
 	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_options.c src/options.c $(DEBUG_LDFLAGS)
@@ -58,9 +63,16 @@ tests/test_http_parser: tests/test_http_parser.c src/http_parser.c src/http_pars
 tests/test_http_response: tests/test_http_response.c src/http_response.c src/http_response.h src/io.c src/io.h $(BUILD_STAMP)
 	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_http_response.c src/http_response.c src/io.c $(DEBUG_LDFLAGS)
 
-HTTP_CONN_SRC = src/http_conn.c src/http_parser.c src/http_response.c src/io.c
-tests/test_http_conn: tests/test_http_conn.c $(HTTP_CONN_SRC) src/http_conn.h src/http_parser.h src/http_response.h src/io.h $(BUILD_STAMP)
+HTTP_CONN_SRC = src/http_conn.c src/http_parser.c src/http_response.c src/io.c src/static_file.c src/mime.c
+tests/test_http_conn: tests/test_http_conn.c $(HTTP_CONN_SRC) src/http_conn.h src/http_parser.h src/http_response.h src/io.h src/static_file.h src/mime.h $(BUILD_STAMP)
 	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_http_conn.c $(HTTP_CONN_SRC) $(DEBUG_LDFLAGS)
+
+tests/test_mime: tests/test_mime.c src/mime.c src/mime.h $(BUILD_STAMP)
+	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_mime.c src/mime.c $(DEBUG_LDFLAGS)
+
+STATIC_FILE_SRC = src/static_file.c src/mime.c src/io.c
+tests/test_static_file: tests/test_static_file.c $(STATIC_FILE_SRC) src/static_file.h src/mime.h src/io.h $(BUILD_STAMP)
+	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_static_file.c $(STATIC_FILE_SRC) $(DEBUG_LDFLAGS)
 
 # D-06 실험: SO_REUSEADDR 없이 bind만 해 본다. 서버 소스와 분리한 별도 프로그램이다(빌드만 한다).
 experiment: $(EXPERIMENT)
@@ -70,9 +82,10 @@ $(EXPERIMENT): experiments/bind_no_reuse.c $(BUILD_STAMP)
 
 # 테스트용 www는 컨테이너 내부 Linux 전용 폴더에 만든다. bind mount(Docker Desktop)는 권한 000을 실제로 강제하지 못한다.
 # 폴더 위치와 large.bin 크기(4MB)는 recipe 안의 고정값이다(make 변수로 덮어쓸 수 없다).
-# 같은 컨테이너에서는 이 폴더를 재사용하고 아래 7개 파일만 rm -f 후 새로 쓴다(링크면 링크만 지워진다).
+# 같은 컨테이너에서는 이 폴더를 재사용하고 아래 7개 파일과 sub/index.html만 rm -f 후 새로 쓴다(링크면 링크만 지워진다).
+# 하위 폴더 sub/, empty/는 만들기만 하고 empty/index.html은 지운다(D-39). 링크이거나 폴더가 아니면 실패한다.
 # 호스트 $(WWW)/는 읽기만 한다. stdout에는 폴더 경로 한 줄만 쓴다: dir=$$(make -s fixtures)
-FIXTURE_COPY = index.html style.css app.js image.png photo.jpg
+FIXTURE_COPY = index.html style.css app.js image.png photo.jpg sub/index.html
 
 fixtures:
 	@set -e; dir=/home/jungle/mini-webserver-www; \
@@ -80,6 +93,12 @@ fixtures:
 	if [ -L "$$dir" ]; then echo "$$dir 가 심볼릭 링크다. 확인 후 직접 지워라" >&2; exit 1; fi; \
 	mkdir -p "$$dir"; \
 	if [ -L "$$dir" ] || [ ! -d "$$dir" ]; then echo "$$dir 가 실제 디렉터리가 아니다" >&2; exit 1; fi; \
+	for d in sub empty; do \
+	  if [ -L "$$dir/$$d" ]; then echo "$$dir/$$d 가 심볼릭 링크다. 확인 후 직접 지워라" >&2; exit 1; fi; \
+	  mkdir -p "$$dir/$$d"; \
+	  if [ -L "$$dir/$$d" ] || [ ! -d "$$dir/$$d" ]; then echo "$$dir/$$d 가 실제 디렉터리가 아니다" >&2; exit 1; fi; \
+	done; \
+	rm -f -- "$$dir/empty/index.html"; \
 	for f in $(FIXTURE_COPY); do rm -f -- "$$dir/$$f"; cp -- "$(WWW)/$$f" "$$dir/$$f"; done; \
 	rm -f -- "$$dir/large.bin"; \
 	dd if=/dev/urandom of="$$dir/large.bin" bs=1048576 count=4 status=none; \
@@ -87,7 +106,7 @@ fixtures:
 	echo "secret: 이 내용이 응답에 보이면 안 된다(403 검증용)." > "$$dir/secret.txt"; \
 	chmod 000 "$$dir/secret.txt"; \
 	if [ -r "$$dir/secret.txt" ]; then echo "secret.txt가 여전히 읽힌다" >&2; exit 1; fi; \
-	echo "준비 완료 (secret.txt 권한 000, large.bin 4MB). 실행: ./webserver -p 8080 -r $$dir" >&2; \
+	echo "준비 완료 (secret.txt 권한 000, large.bin 4MB, sub/index.html, 빈 empty/). 실행: ./webserver -p 8080 -r $$dir" >&2; \
 	echo "$$dir"
 
 clean:
@@ -97,7 +116,7 @@ clean:
 help:
 	@echo "make          기본 빌드 ($(TARGET))"
 	@echo "make debug    디버그 빌드 ($(DEBUG_TARGET), AddressSanitizer)"
-	@echo "make test     단위 테스트 빌드 후 실행 (test_options, test_echo, test_http_parser, test_http_response, test_http_conn)"
+	@echo "make test     단위 테스트 빌드 후 실행 (test_options, test_echo, test_http_parser, test_http_response, test_http_conn, test_mime, test_static_file)"
 	@echo "make experiment SO_REUSEADDR 없는 bind 실험 프로그램 빌드 ($(EXPERIMENT))"
 	@echo "make fixtures 컨테이너 내부 /home/jungle/mini-webserver-www에 테스트용 www 준비, 경로를 stdout에 출력"
 	@echo "make clean    빌드 산출물 삭제"
