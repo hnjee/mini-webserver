@@ -1,3 +1,12 @@
 .venv/
 __pycache__/
 .DS_Store
+# 빌드 결과
+build/
+webserver
+webserver-debug
+*.dSYM/
+
+# make www로 생성하는 테스트 파일
+www/large.bin
+www/secret.txt
