@@ -14,6 +14,7 @@ const char *status_text(int status)
     case 400: return "Bad Request";
     case 403: return "Forbidden";
     case 404: return "Not Found";
+    case 414: return "URI Too Long";
     case 431: return "Request Header Fields Too Large";
     case 500: return "Internal Server Error";
     case 501: return "Not Implemented";
@@ -39,8 +40,7 @@ int write_all(int fd, const void *buf, size_t len)
     return 0;
 }
 
-int send_response(int fd, int status, const char *content_type,
-                  const char *body, size_t body_len)
+int send_header(int fd, int status, const char *content_type, size_t content_length)
 {
     char header[RESPONSE_HEADER_SIZE];
     char date[64];
@@ -59,11 +59,17 @@ int send_response(int fd, int status, const char *content_type,
                  "Content-Length: %zu\r\n"
                  "Connection: close\r\n"
                  "\r\n",
-                 status, status_text(status), date, content_type, body_len);
+                 status, status_text(status), date, content_type, content_length);
     if (n < 0 || (size_t)n >= sizeof(header))
         return -1;   /* 헤더가 잘렸다. 잘린 응답은 보내지 않는다 */
 
-    if (write_all(fd, header, (size_t)n) < 0)
+    return write_all(fd, header, (size_t)n);
+}
+
+int send_response(int fd, int status, const char *content_type,
+                  const char *body, size_t body_len)
+{
+    if (send_header(fd, status, content_type, body_len) < 0)
         return -1;
     if (body_len > 0 && write_all(fd, body, body_len) < 0)
         return -1;

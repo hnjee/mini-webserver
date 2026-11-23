@@ -155,6 +155,6 @@ int main(void)
     test_501_505();
     test_order();
 
-    printf("%d checks, %d failures\n", g_checks, g_failures);
+    printf("test_request: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

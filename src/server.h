@@ -10,8 +10,9 @@ int server_open(int port);
 
 /*
  * accept()를 반복하며 연결을 하나씩 처리한다. 돌아오지 않는다.
- * 연결마다 HTTP 요청 하나를 읽고 응답한 뒤 연결을 닫는다 (Step 2).
+ * 연결마다 HTTP 요청 하나를 읽고 응답한 뒤 연결을 닫는다.
+ * root는 realpath()로 구한 정적 파일 루트의 절대 경로다.
  */
-void server_run(int listen_fd);
+void server_run(int listen_fd, const char *root);
 
 #endif

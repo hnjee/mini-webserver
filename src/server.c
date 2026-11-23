@@ -2,6 +2,7 @@
 
 #include "request.h"
 #include "response.h"
+#include "static.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -13,7 +14,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-/* 정상 요청에 보내는 고정 본문. 파일 서빙은 Step 3에서 붙인다 */
+/* POST에 보내는 고정 본문. POST가 할 일은 Step 4에서 정한다 */
 static const char HELLO_BODY[] = "<h1>Hello, world!</h1>";
 
 /*
@@ -21,17 +22,17 @@ static const char HELLO_BODY[] = "<h1>Hello, world!</h1>";
  *   1. 버퍼에 이어 붙이며 "\r\n\r\n"이 나올 때까지 read()를 반복한다
  *      (한 번의 read()로 요청이 다 온다고 가정하지 않는다)
  *   2. 헤더를 파싱해 400·501·505를 판정한다
- *   3. 정상이면 고정 HTML로 200, 아니면 에러 응답을 보낸다
- * 헤더 뒤에 딸려 온 바이트는 Step 2에서는 버린다 (Step 4에서 다음 요청으로 쓴다).
+ *   3. GET이면 root 안의 파일을 보내고, POST면 고정 HTML로 200, 에러면 에러 응답을 보낸다
+ * 헤더 뒤에 딸려 온 바이트는 아직 버린다 (Step 4에서 본문이나 다음 요청으로 쓴다).
  */
-static void handle_http(int client_fd)
+static void handle_http(int client_fd, const char *root)
 {
     char buf[REQUEST_BUF_SIZE];
     size_t len = 0;
     ssize_t end;
     struct http_request req;
     int status;
-    int rc;
+    int rc = 0;
 
     /* 1. 헤더 끝까지 읽기 */
     for (;;) {
@@ -67,7 +68,9 @@ static void handle_http(int client_fd)
     status = parse_request(buf, (size_t)end, &req);
 
     /* 3. 응답 */
-    if (status == 0) {
+    if (status == 0 && strcmp(req.method, "GET") == 0) {
+        status = serve_static(client_fd, root, &req);   /* 응답까지 보낸다 */
+    } else if (status == 0) {
         status = 200;
         rc = send_response(client_fd, status, "text/html",
                            HELLO_BODY, sizeof(HELLO_BODY) - 1);
@@ -123,7 +126,7 @@ int server_open(int port)
     return listen_fd;
 }
 
-void server_run(int listen_fd)
+void server_run(int listen_fd, const char *root)
 {
     for (;;) {
         struct sockaddr_in client_addr;
@@ -145,7 +148,7 @@ void server_run(int listen_fd)
         client_port = ntohs(client_addr.sin_port);
 
         printf("connected: %s:%d (fd=%d)\n", ip, client_port, client_fd);
-        handle_http(client_fd);   /* 끝나면 client_fd를 닫고 돌아온다 */
+        handle_http(client_fd, root);   /* 끝나면 client_fd를 닫고 돌아온다 */
         printf("closed:    %s:%d\n", ip, client_port);
     }
 }
