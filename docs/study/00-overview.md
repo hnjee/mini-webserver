@@ -46,7 +46,6 @@ flowchart LR
 - socket, bind, listen, accept, connect, read, write, close
 - blocking 동작, listen 대기열, SO_REUSEADDR, bind 실패 원인
 - read/write가 요청한 만큼 다 처리하지 않는 경우(short read/write)
-- 직접 체험하기: 접속하면 고정 문자열을 돌려주는 20~30줄짜리 서버를 만들고 curl, nc로 접속해 보기
 
 **[5. HTTP/1.1 메시지](./05-http.md)**
 
@@ -55,7 +54,6 @@ flowchart LR
 - 핵심 헤더: Host, Content-Type, Content-Length, Connection-
 - 경계 식별: \r\n\r\n, Content-Length 기반 본문 길이 (chunked는 개념만)
 - keep-alive: 연결 하나로 여러 요청 처리하기
-- 직접 체험하기: curl -v로 실제 요청·응답 원문 확인, 4장 서버를 HTTP 응답을 돌려주도록 고쳐 브라우저로 접속해 보기
 
 **[6. 정적·동적 콘텐츠](./06-static-dynamic.md)**
 

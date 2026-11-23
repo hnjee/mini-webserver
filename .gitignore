@@ -10,6 +10,8 @@ AGENTS.md
 /webserver
 /webserver-debug
 /tests/test_options
+/tests/test_echo
+/experiments/bind_no_reuse
 /.build-platform
 *.dSYM/
 

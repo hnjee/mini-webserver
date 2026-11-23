@@ -13,6 +13,7 @@
 | 소스·테스트 폴더 구성 | `src/`, `tests/` 분리 | [Step 0](./steps/step-0-setup/decision.md) |
 | 실행 인자 파싱 | 별도 `getopt` 모듈 (`-p`, `-r`; `-c`는 Step 6) | [Step 0](./steps/step-0-setup/decision.md) |
 | 시험 파일 | 컨테이너 내부 전용 폴더 재사용 (Step 0 검증 통과) | [Step 0](./steps/step-0-setup/decision.md) |
+| 에코 서버 구성 | `listener`·`echo` 모듈 분리, `accept` 반복은 `main.c`, 순차 처리, `SIGPIPE` 무시 | [Step 1](./steps/step-1-echo/decision.md) |
 | 연결별 버퍼 관리 | 미정 | [Step 2](./steps/step-2-http-parse/decision.md) |
 | 파싱 결과 구조 | 미정 | [Step 2](./steps/step-2-http-parse/decision.md) |
 | 경로 탈출 방지 · 큰 파일 전송 | 미정 | [Step 3](./steps/step-3-static/decision.md) |
@@ -28,4 +29,6 @@ Step을 진행하며 실제로 만든 모듈만 추가한다.
 | 모듈 | 파일 | 역할 | 추가된 Step |
 | ---- | ---- | ---- | ----------- |
 | 실행 인자 | `src/options.c`, `src/options.h` | 포트·정적 루트 인자 검사 | 0 |
-| 진입점 | `src/main.c` | 설정 출력 후 종료 (Step 1 연결 대기) | 0 |
+| 진입점 | `src/main.c` | 인자 확인, `SIGPIPE` 무시, `accept` 반복, 연결 소켓 닫기 | 0, 1 |
+| 듣는 소켓 | `src/listener.c`, `src/listener.h` | `socket`·`SO_REUSEADDR`·`bind`·`listen` | 1 |
+| 에코 | `src/echo.c`, `src/echo.h` | 연결 하나의 읽기·쓰기 에코 | 1 |

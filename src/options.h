@@ -3,10 +3,10 @@
 
 #include <stddef.h>
 
-/* 실행 인자 파싱 결과. Step 0에서는 값을 확인만 하고 소켓은 열지 않는다. */
+/* 실행 인자 파싱 결과. Step 1은 -p로 소켓을 열고, -r은 존재만 확인한다(사용은 Step 3부터). */
 typedef struct {
     int port;         /* -p: 1~65535 */
-    const char *root; /* -r: 존재하는 디렉터리 */
+    const char *root; /* -r: 존재하는 디렉터리 (Step 3부터 사용) */
 } options;
 
 typedef enum {

@@ -9,7 +9,7 @@
 | ID | 내용 | Step | 상태 |
 | -- | ---- | ---- | ---- |
 | T-01 | C + POSIX만 사용, `Makefile`/CMake, 포트·루트·라우팅을 인자나 설정 파일로 (라우팅 설정은 Step 6) | [Step 0](./steps/step-0-setup/README.md) | 🟦 |
-| R-01 | `socket` → `bind` → `listen` → `accept`, 요청·응답 송수신 | [Step 1](./steps/step-1-echo/README.md) | ⬜ |
+| R-01 | `socket` → `bind` → `listen` → `accept`, 요청·응답 송수신 | [Step 1](./steps/step-1-echo/README.md) | ✅ |
 | R-02 | 요청 라인·헤더(`Host`, `Content-Length`, `Connection`) 파싱 | [Step 2](./steps/step-2-http-parse/README.md) | ⬜ |
 | R-03 | 응답 생성: 상태 라인, 표준 헤더, 본문 | [Step 2](./steps/step-2-http-parse/README.md) | ⬜ |
 | R-04 | 정적 파일 서빙, MIME 매핑, 404·403·500 | [Step 3](./steps/step-3-static/README.md) | ⬜ |

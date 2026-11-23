@@ -1,4 +1,4 @@
-# Step 0: 기본 빌드, 디버그(ASan) 빌드, 단위 테스트, 공통 테스트 파일.
+# 기본 빌드, 디버그(ASan) 빌드, 단위 테스트, 공통 테스트 파일, SO_REUSEADDR 실험(Step 1).
 CC      ?= cc
 CSTD    ?= -std=c11
 WARN    ?= -Wall -Wextra -Wpedantic
@@ -10,14 +10,14 @@ DEBUG_LDFLAGS = -fsanitize=address
 
 TARGET      = webserver
 DEBUG_TARGET = webserver-debug
-SRC         = src/main.c src/options.c
-LIB_SRC     = src/options.c
-TEST_SRC    = tests/test_options.c $(LIB_SRC)
-TEST_TARGET = tests/test_options
+SRC         = src/main.c src/options.c src/listener.c src/echo.c
+HDR         = src/options.h src/listener.h src/echo.h
+TEST_TARGETS = tests/test_options tests/test_echo
+EXPERIMENT  = experiments/bind_no_reuse
 
 WWW        = www
 
-.PHONY: all debug test fixtures clean help FORCE
+.PHONY: all debug test experiment fixtures clean help FORCE
 
 # bind mount로 호스트(macOS) 산출물이 섞일 수 있다. 플랫폼이 바뀌면 이 파일이 갱신되어 전부 다시 빌드된다.
 BUILD_STAMP    = .build-platform
@@ -28,21 +28,31 @@ $(BUILD_STAMP): FORCE
 
 all: $(TARGET)
 
-$(TARGET): $(SRC) src/options.h $(BUILD_STAMP)
+$(TARGET): $(SRC) $(HDR) $(BUILD_STAMP)
 	$(CC) $(CSTD) $(WARN) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS)
 
 # 디버그 빌드는 AddressSanitizer를 켠다.
 debug: $(DEBUG_TARGET)
 
-$(DEBUG_TARGET): $(SRC) src/options.h $(BUILD_STAMP)
+$(DEBUG_TARGET): $(SRC) $(HDR) $(BUILD_STAMP)
 	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ $(SRC) $(DEBUG_LDFLAGS)
 
 # 단위 테스트도 ASan으로 빌드해 실행한다.
-test: $(TEST_TARGET)
-	./$(TEST_TARGET)
+test: $(TEST_TARGETS)
+	./tests/test_options
+	./tests/test_echo
 
-$(TEST_TARGET): $(TEST_SRC) src/options.h $(BUILD_STAMP)
-	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ $(TEST_SRC) $(DEBUG_LDFLAGS)
+tests/test_options: tests/test_options.c src/options.c src/options.h $(BUILD_STAMP)
+	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_options.c src/options.c $(DEBUG_LDFLAGS)
+
+tests/test_echo: tests/test_echo.c src/echo.c src/echo.h $(BUILD_STAMP)
+	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_echo.c src/echo.c $(DEBUG_LDFLAGS)
+
+# D-06 실험: SO_REUSEADDR 없이 bind만 해 본다. 서버 소스와 분리한 별도 프로그램이다(빌드만 한다).
+experiment: $(EXPERIMENT)
+
+$(EXPERIMENT): experiments/bind_no_reuse.c $(BUILD_STAMP)
+	$(CC) $(CSTD) $(WARN) $(CFLAGS) -o $@ experiments/bind_no_reuse.c $(LDFLAGS)
 
 # 테스트용 www는 컨테이너 내부 Linux 전용 폴더에 만든다. bind mount(Docker Desktop)는 권한 000을 실제로 강제하지 못한다.
 # 폴더 위치와 large.bin 크기(4MB)는 recipe 안의 고정값이다(make 변수로 덮어쓸 수 없다).
@@ -67,12 +77,13 @@ fixtures:
 	echo "$$dir"
 
 clean:
-	rm -f $(TARGET) $(DEBUG_TARGET) $(TEST_TARGET) $(BUILD_STAMP)
-	rm -rf $(TARGET).dSYM $(DEBUG_TARGET).dSYM $(TEST_TARGET).dSYM
+	rm -f $(TARGET) $(DEBUG_TARGET) $(TEST_TARGETS) $(EXPERIMENT) $(BUILD_STAMP)
+	rm -rf $(TARGET).dSYM $(DEBUG_TARGET).dSYM $(addsuffix .dSYM,$(TEST_TARGETS))
 
 help:
 	@echo "make          기본 빌드 ($(TARGET))"
 	@echo "make debug    디버그 빌드 ($(DEBUG_TARGET), AddressSanitizer)"
-	@echo "make test     단위 테스트 빌드 후 실행"
+	@echo "make test     단위 테스트 빌드 후 실행 (test_options, test_echo)"
+	@echo "make experiment SO_REUSEADDR 없는 bind 실험 프로그램 빌드 ($(EXPERIMENT))"
 	@echo "make fixtures 컨테이너 내부 /home/jungle/mini-webserver-www에 테스트용 www 준비, 경로를 stdout에 출력"
 	@echo "make clean    빌드 산출물 삭제"

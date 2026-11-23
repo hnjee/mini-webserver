@@ -62,7 +62,7 @@ void options_usage(void *stream, const char *program_name)
 
     fprintf(out, "사용법: %s -p <포트> -r <루트 디렉터리>\n", program_name);
     fprintf(out, "  -p  서버가 열 포트 번호 (%d~%d)\n", PORT_MIN, PORT_MAX);
-    fprintf(out, "  -r  정적 파일 루트 디렉터리 (존재해야 한다)\n");
+    fprintf(out, "  -r  정적 파일 루트 디렉터리 (존재해야 한다, Step 3부터 사용)\n");
     fprintf(out, "  -h  이 도움말을 출력한다\n");
 }
 
