@@ -12,7 +12,7 @@ Step 1 서버는 리슨 소켓 하나로 클라이언트를 한 명씩 받아, �
 | S1-04 | setsockopt | `setsockopt()`가 실패하면, 서버는 이유를 출력하고 소켓을 닫은 뒤 종료 코드 1로 끝나야 한다. | 코드 리뷰 | 실패 경로에 `perror("setsockopt")`와 `close(fd)`가 있고 종료 코드 1로 끝난다 |
 | S1-05 | bind | 서버는 리슨 소켓에 모든 IP 주소와 `-p`로 받은 포트 번호를 붙여야 한다. | 서버를 띄운 채 `ss -ltn \| grep 8080` | `0.0.0.0:8080`이 나온다 |
 | S1-06 | bind | 포트를 이미 다른 프로그램이 쓰고 있으면, 서버는 이유를 출력하고 리슨 소켓을 닫은 뒤 종료 코드 1로 끝나야 한다. | 서버를 하나 띄운 채 다른 터미널에서 `./webserver -p 8080 -r ./www; echo "exit=$?"` | `bind: Address already in use`, `exit=1` |
-| S1-07 | bind | 1024 미만 포트를 쓸 권한이 없으면, 서버는 이유를 출력하고 리슨 소켓을 닫은 뒤 종료 코드 1로 끝나야 한다. | 일반 사용자로 `./webserver -p 80 -r ./www; echo "exit=$?"` | `bind: Permission denied`, `exit=1` |
+| S1-07 | bind | 1024 미만 포트를 쓸 권한이 없으면, 서버는 이유를 출력하고 리슨 소켓을 닫은 뒤 종료 코드 1로 끝나야 한다. | `strace -o /dev/null -e inject=bind:error=EACCES ./webserver -p 80 -r ./www; echo "exit=$?"` | `bind: Permission denied`, `exit=1` (Docker는 일반 사용자도 낮은 포트를 쓸 수 있어 strace로 권한 실패를 만든다) |
 | S1-08 | listen | 서버는 리슨 소켓을 socket → setsockopt → bind → listen 순서로 준비해야 한다. | `strace -e trace=socket,setsockopt,bind,listen ./webserver -p 8080 -r ./www` | 네 시스템 콜이 이 순서로 찍히고 모두 성공한다 |
 | S1-09 | listen | 서버는 리슨 소켓을 LISTEN 상태로 만들어 클라이언트 연결을 받을 준비를 해야 한다. | 서버를 띄운 채 `ss -ltn \| grep 8080` | 줄 맨 앞이 `LISTEN`이다 |
 | S1-10 | listen | 준비가 끝나면, 서버는 `listening on 포트`를 출력하고 끝나지 않고 클라이언트를 기다려야 한다. | `./webserver -p 8080 -r ./www` | `listening on 8080`이 나오고 프롬프트로 돌아오지 않는다 |

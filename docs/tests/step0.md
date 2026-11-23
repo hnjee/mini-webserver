@@ -65,8 +65,8 @@ BT-04 다음에는 `make clean && make`로 일반 빌드로 되돌린 뒤 다음
 
 | 번호 | 요구사항 | 명령 | 기대 결과 |
 | --- | --- | --- | --- |
-| RT-01 | S0-A01, S0-A07 | `./webserver -p 8080 -r ./www; echo $?` | `port: 8080`, `root: ./www`가 나오고 `0` |
-| RT-02 | S0-A02 | `./webserver -p 8080 -r ./www -c routes.conf; echo $?` | 출력에 `config: routes.conf`가 있고 `0` |
+| RT-01 | S0-A01, S0-A07 | `./webserver -p 8080 -r ./www` | `port: 8080`, `root: ./www`, `listening on 8080`이 나오고 끝나지 않는다 (Step 1부터, Ctrl+C로 끔) |
+| RT-02 | S0-A02 | `./webserver -p 8080 -r ./www -c routes.conf` | 출력에 `config: routes.conf`와 `listening on 8080`이 있고 끝나지 않는다 (Step 1부터, Ctrl+C로 끔) |
 | RT-03 | S0-A03 | `./webserver -p 8080; echo $?` | `usage:`로 시작하는 줄과 `1` |
 | RT-04 | S0-A03 | `./webserver -r ./www; echo $?` | `usage:`로 시작하는 줄과 `1` |
 | RT-05 | S0-A04 | `./webserver -p abc -r ./www; echo $?` | 포트 에러와 `1` |

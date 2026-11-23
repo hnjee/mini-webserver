@@ -6,7 +6,7 @@
 
 | 종류 | 확인하는 것 | 요구사항 |
 | --- | --- | --- |
-| 단위 테스트 | `server_listen()`이 리슨 소켓을 맞게 준비하는지, `serve_client()`가 받은 바이트를 그대로 돌려주는지 | S1-01, S1-03, S1-05~S1-07, S1-09, S1-18, S1-20, S1-22, S1-23, S1-25 |
+| 단위 테스트 | `server_listen()`이 리슨 소켓을 맞게 준비하는지, `serve_client()`가 받은 바이트를 그대로 돌려주는지 | S1-01, S1-03, S1-05, S1-06, S1-09, S1-18, S1-20, S1-22, S1-23, S1-25 |
 | 기능 테스트 | 서버를 띄우고 `nc`로 접속했을 때 출력, 소켓 상태, fd 수 | S1-01~S1-03, S1-05~S1-10, S1-12~S1-15, S1-18~S1-20, S1-22~S1-25, S1-27~S1-31 |
 | 코드 리뷰 | 테스트로 일부러 일으키기 어려운 오류 경로 | S1-04, S1-11, S1-16, S1-17, S1-21, S1-26, S1-32 |
 
@@ -17,11 +17,7 @@
 - Dev Container 터미널에서 저장소 루트로 이동해요.
 - 기능 테스트는 터미널 3개를 써요. 터미널 1은 서버, 터미널 2와 3은 클라이언트예요.
 - `nc`가 `-N` 옵션을 지원하는지 확인해요. `nc -h 2>&1 | grep -- -N`에서 한 줄이 나와야 해요.
-- S1-07(1024 미만 포트)은 먼저 아래 값을 확인해요. `0`이면 컨테이너가 일반 사용자에게도 낮은 포트를 허용하는 설정이라, 이 컨테이너에서는 재현할 수 없어요. 그때는 결과에 "해당 없음"과 그 값을 적어요.
-
-```bash
-cat /proc/sys/net/ipv4/ip_unprivileged_port_start   # 1024면 재현 가능
-```
+- S1-07(1024 미만 포트)은 Docker에서 그대로는 확인할 수 없어요. Docker는 `ip_unprivileged_port_start=0`이라 일반 사용자도 80번 포트를 쓸 수 있거든요. 그래서 FT-06에서 strace로 `bind()`를 `EACCES`로 실패시켜 확인해요. UT-06은 이 값이 1024인 일반 리눅스에서만 돌고, Docker에서는 건너뛰어요.
 
 ## 3. 단위 테스트
 
@@ -38,7 +34,7 @@ cat /proc/sys/net/ipv4/ip_unprivileged_port_start   # 1024면 재현 가능
 | UT-03 | UT-01의 fd로 `getsockopt(SO_REUSEADDR)` | 값이 `1` | S1-03 |
 | UT-04 | UT-01의 fd로 `getsockname()` | 주소가 `INADDR_ANY`(0.0.0.0) | S1-05 |
 | UT-05 | `getsockname()`으로 얻은 포트로 `server_listen()`을 한 번 더 호출 | `-1`, 호출 전후 `/proc/self/fd` 개수가 같음 (실패 경로에서 소켓을 닫음) | S1-06 |
-| UT-06 | `server_listen(80)` (일반 사용자, 준비 2번의 값이 1024일 때만) | `-1` | S1-07 |
+| UT-06 | `server_listen(80)` (일반 사용자, `ip_unprivileged_port_start`가 1024일 때만. Docker에서는 건너뛰고 FT-06으로 확인) | `-1` | S1-07 |
 
 ### serve_client
 
@@ -70,7 +66,7 @@ UT-10에서 부모가 쓰기와 읽기를 혼자 하면, 버퍼가 차서 양쪽
 | FT-03 | S1-05, S1-09 | `ss -ltn 'sport = :8080'` | `LISTEN` 줄에 `0.0.0.0:8080`이 있다 |
 | FT-04 | S1-08 | 서버를 끄고 `strace -e trace=socket,setsockopt,bind,listen ./webserver -p 8080 -r ./www` | 네 시스템 콜이 이 순서로 찍히고 모두 `= 0` 또는 `= 3`으로 성공한다 |
 | FT-05 | S1-06 | 서버를 띄운 채 터미널 2: `./webserver -p 8080 -r ./www; echo "exit=$?"` | `bind: Address already in use`, `exit=1` |
-| FT-06 | S1-07 | 일반 사용자로 `./webserver -p 80 -r ./www; echo "exit=$?"` | `bind: Permission denied`, `exit=1` (준비의 값이 `0`이면 해당 없음) |
+| FT-06 | S1-07 | `strace -o /dev/null -e inject=bind:error=EACCES ./webserver -p 80 -r ./www; echo "exit=$?"` | `bind: Permission denied`, `exit=1` |
 | FT-07 | S1-02 | `strace -o /dev/null -e inject=socket:error=EMFILE ./webserver -p 8081 -r ./www; echo "exit=$?"` | `socket: Too many open files`, `exit=1` |
 | FT-08 | S1-03 | 터미널 2: `nc localhost 8080` 유지 → 터미널 1: Ctrl+C → `ss -tan \| grep 8080` → 바로 서버 다시 실행 | `TIME-WAIT` 줄이 보이는데도 `listening on 8080`이 나온다 |
 
