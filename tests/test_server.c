@@ -3,20 +3,27 @@
  * - Step 1: docs/tests/step1.md 3장 UT-01 ~ UT-06 (server_listen). 이름 앞에 S1을 붙인다.
  *   server_listen()은 포트 0으로 열어서 8080 서버와 부딪히지 않게 한다.
  * - Step 2: docs/tests/step2.md 4장 UT-40 ~ UT-48 (handle_conn). 이름 앞에 S2를 붙인다.
- *   socketpair()로 만든 소켓 두 개 중 하나를 conn에 넣어 handle_conn()에 넘기고,
- *   다른 쪽은 자식 프로세스가 클라이언트로서 요청을 쓴다.
+ * - Step 3: docs/tests/step3.md 4장 UT-32 ~ UT-39 (handle_conn 파일 응답). 이름 앞에 S3를 붙인다.
+ *   socketpair()로 만든 소켓 두 개 중 하나를 conn에 넣어 자식 프로세스에서 handle_conn()을 돌리고,
+ *   부모는 다른 쪽에서 클라이언트로서 요청을 쓰고 응답을 읽는다.
+ *   handle_conn()의 루트는 /tmp 아래에 만든 테스트용 www 폴더다.
  */
+/* realpath()는 POSIX의 XSI 부분이라 _XOPEN_SOURCE를 켜야 선언된다 */
+#define _XOPEN_SOURCE 700
+
 #include "server.h"
 
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -136,15 +143,83 @@ static void ut06_low_port(void)
         close(fd);
 }
 
-/* ---- Step 2: handle_conn ---- */
+/* ---- 테스트용 루트 ---- */
+
+#define LARGE_SIZE (1024 * 1024)
+#define OUT_CAP (LARGE_SIZE + 4096)
+
+static char g_base[] = "/tmp/ws_server_XXXXXX";
+static char g_root[PATH_MAX];       /* 테스트 루트의 실제 위치 */
+
+static const char INDEX_HTML[] = "<h1>hi</h1>\n";
+static const char STYLE_CSS[] = "body { color: red; }\n";
+
+static char pattern_byte(size_t i)
+{
+    return (char)((i * 31 + 7) % 251);
+}
+
+static int write_bytes(const char *dir, const char *name, const char *data, size_t len)
+{
+    char p[PATH_MAX];
+    snprintf(p, sizeof(p), "%s/%s", dir, name);
+    int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return -1;
+    int r = write_full(fd, data, len);
+    close(fd);
+    return r;
+}
+
+/* <base>/www 에 index.html, style.css, image.png(0~255 바이트), large.bin(1MB), secret.txt(권한 000)를 만든다 */
+static int make_fixture(void)
+{
+    char www[PATH_MAX];
+    if (mkdtemp(g_base) == NULL)
+        return 0;
+    snprintf(www, sizeof(www), "%s/www", g_base);
+    if (mkdir(www, 0755) < 0)
+        return 0;
+
+    char png[256];
+    for (int i = 0; i < 256; i++)
+        png[i] = (char)i;
+    char *large = malloc(LARGE_SIZE);
+    if (large == NULL)
+        return 0;
+    for (size_t i = 0; i < LARGE_SIZE; i++)
+        large[i] = pattern_byte(i);
+
+    int ok = write_bytes(www, "index.html", INDEX_HTML, sizeof(INDEX_HTML) - 1) == 0 &&
+             write_bytes(www, "style.css", STYLE_CSS, sizeof(STYLE_CSS) - 1) == 0 &&
+             write_bytes(www, "image.png", png, sizeof(png)) == 0 &&
+             write_bytes(www, "large.bin", large, LARGE_SIZE) == 0 &&
+             write_bytes(www, "secret.txt", "secret\n", 7) == 0;
+    free(large);
+
+    char secret[PATH_MAX + 16];
+    snprintf(secret, sizeof(secret), "%s/secret.txt", www);
+    chmod(secret, 0);
+    return ok && realpath(www, g_root) != NULL;
+}
+
+static void remove_fixture(void)
+{
+    char cmd[PATH_MAX + 16];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", g_base);
+    if (system(cmd) != 0)
+        printf("  (임시 폴더 %s를 지우지 못함)\n", g_base);
+}
+
+/* ---- handle_conn 실행 ---- */
 
 #define SPLIT_NONE ((size_t)-1)
 
 struct conn_result {
-    int ret;            /* handle_conn() 리턴값 */
-    char out[1024];     /* 클라이언트가 받은 응답 */
+    int ret;            /* handle_conn() 리턴값 (-2: 알 수 없음) */
+    int leftover_zero;  /* handle_conn() 뒤 서버 쪽 소켓의 recv(MSG_DONTWAIT)가 0이었으면 1 */
+    char *out;          /* 클라이언트가 받은 응답 (끝에 '\0'을 붙여 둠) */
     ssize_t got;        /* 받은 바이트 수 */
-    ssize_t leftover;   /* handle_conn() 뒤 서버 쪽 소켓에서 recv(MSG_DONTWAIT) 한 결과 */
 };
 
 static void sleep_100ms(void)
@@ -154,50 +229,67 @@ static void sleep_100ms(void)
 }
 
 /*
- * 자식은 req를 쓰고 쓰기를 닫는다. split이 SPLIT_NONE이 아니면 split바이트까지 쓰고 0.1초 쉰 뒤 나머지를 쓴다.
- * 부모는 conn을 만들어 handle_conn()을 돌리고, 서버 쪽에 남은 데이터를 확인한 뒤 응답을 끝까지 읽는다.
+ * 자식이 conn을 만들어 handle_conn(c, g_root)을 돌린다. 리턴값과 남은 데이터 여부는 종료 코드로 알린다.
+ * 부모는 req를 쓰고(split이면 split바이트까지 쓰고 0.1초 쉰 뒤 나머지) 쓰기를 닫은 다음, 응답을 끝까지 읽는다.
  */
 static void run_conn(const char *req, size_t len, size_t split, struct conn_result *res)
 {
-    memset(res, 0, sizeof(*res));
     res->ret = -2;
+    res->leftover_zero = 0;
+    res->got = -1;
+    res->out = malloc(OUT_CAP + 1);
+    if (res->out == NULL)
+        return;
+    res->out[0] = '\0';
 
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
         return;
 
-    pid_t writer = fork();
-    if (writer == 0) {
+    pid_t server = fork();
+    if (server == 0) {
+        close(sv[0]);
+        struct conn *c = malloc(sizeof(*c));
+        if (c == NULL)
+            _exit(3);
+        c->fd = sv[1];
+        c->len = 0;
+        int r = handle_conn(c, g_root);
+        char t;
+        int zero = recv(sv[1], &t, 1, MSG_DONTWAIT) == 0;
         close(sv[1]);
-        if (split != SPLIT_NONE && split < len) {
-            write_full(sv[0], req, split);
-            sleep_100ms();
-            write_full(sv[0], req + split, len - split);
-        } else {
-            write_full(sv[0], req, len);
-        }
-        shutdown(sv[0], SHUT_WR);
-        _exit(0);
+        free(c);
+        _exit((r == 0 ? 0 : r == -1 ? 1 : 2) | (zero ? 4 : 0));
     }
-
-    struct conn *c = malloc(sizeof(*c));
-    if (c == NULL)
-        return;
-    c->fd = sv[1];
-    c->len = 0;
-
-    res->ret = handle_conn(c);
-
-    char t;
-    res->leftover = recv(sv[1], &t, 1, MSG_DONTWAIT);
     close(sv[1]);
-    free(c);
 
-    res->got = read_until_eof(sv[0], res->out, sizeof(res->out) - 1);
+    if (split != SPLIT_NONE && split < len) {
+        write_full(sv[0], req, split);
+        sleep_100ms();
+        write_full(sv[0], req + split, len - split);
+    } else {
+        write_full(sv[0], req, len);
+    }
+    shutdown(sv[0], SHUT_WR);
+
+    res->got = read_until_eof(sv[0], res->out, OUT_CAP);
     if (res->got >= 0)
         res->out[res->got] = '\0';
     close(sv[0]);
-    waitpid(writer, NULL, 0);
+
+    int st = 0;
+    waitpid(server, &st, 0);
+    if (WIFEXITED(st)) {
+        int code = WEXITSTATUS(st);
+        res->ret = (code & 3) == 0 ? 0 : (code & 3) == 1 ? -1 : -2;
+        res->leftover_zero = (code & 4) != 0;
+    }
+}
+
+static void free_result(struct conn_result *res)
+{
+    free(res->out);
+    res->out = NULL;
 }
 
 /* 응답이 prefix로 시작하는지 */
@@ -207,13 +299,54 @@ static int starts_with(const struct conn_result *res, const char *prefix)
     return res->got >= (ssize_t)n && memcmp(res->out, prefix, n) == 0;
 }
 
-/* 응답에서 s가 몇 번 나오는지 */
+/* 응답 헤더 영역에서 s가 몇 번 나오는지 */
 static int count_str(const struct conn_result *res, const char *s)
 {
     int n = 0;
     for (const char *p = res->out; (p = strstr(p, s)) != NULL; p += strlen(s))
         n++;
     return n;
+}
+
+/* 응답에서 헤더의 끝 바로 다음 위치. 없으면 -1 */
+static ssize_t body_offset(const struct conn_result *res)
+{
+    for (ssize_t i = 3; i < res->got; i++) {
+        if (memcmp(res->out + i - 3, "\r\n\r\n", 4) == 0)
+            return i + 1;
+    }
+    return -1;
+}
+
+/* 헤더 영역에 "\r\n<line>\r\n"이 있는지 */
+static int has_header_line(const struct conn_result *res, const char *line)
+{
+    ssize_t b = body_offset(res);
+    if (b < 0)
+        return 0;
+    char want[256];
+    snprintf(want, sizeof(want), "\r\n%s\r\n", line);
+    char save = res->out[b];
+    res->out[b] = '\0';
+    int found = strstr(res->out, want) != NULL;
+    res->out[b] = save;
+    return found;
+}
+
+/* Content-Length 값. 없으면 -1 */
+static long content_length(const struct conn_result *res)
+{
+    const char *k = "\r\nContent-Length: ";
+    const char *p = strstr(res->out, k);
+    return p != NULL ? strtol(p + strlen(k), NULL, 10) : -1;
+}
+
+/* 본문이 data와 바이트 단위로 같고, Content-Length도 그 길이인지 */
+static int body_equals(const struct conn_result *res, const char *data, size_t len)
+{
+    ssize_t b = body_offset(res);
+    return b >= 0 && (size_t)(res->got - b) == len && memcmp(res->out + b, data, len) == 0 &&
+           content_length(res) == (long)len;
 }
 
 /* "GET / HTTP/1.1\r\nHost: x\r\nX: aaa…\r\n\r\n" 꼴로 헤더의 끝까지 정확히 total바이트인 요청을 만든다 */
@@ -233,14 +366,19 @@ static char *build_sized_request(size_t total)
 
 #define REQ(lit) (lit), (sizeof(lit) - 1)
 
+/* ---- Step 2: handle_conn ---- */
+
+/* UT-40: Step 2에서는 200 본문이 없었지만(Content-Length: 0), Step 3부터 / 는 index.html을 보낸다.
+   그래서 여기서는 응답 모양(상태 줄 → 헤더 → 빈 줄, 줄 끝 \r\n)만 보고, 내용은 S3 UT-33에서 본다. */
 static void ut40_ok(void)
 {
     struct conn_result r;
     run_conn(REQ("GET / HTTP/1.1\r\nHost: x\r\n\r\n"), SPLIT_NONE, &r);
-    const char *want = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     CHECK("S2 UT-40 리턴 0", r.ret == 0);
-    CHECK("S2 UT-40 응답이 정확히 200 상태 줄·헤더·빈 줄",
-          r.got == (ssize_t)strlen(want) && memcmp(r.out, want, strlen(want)) == 0);
+    CHECK("S2 UT-40 상태 줄 200", starts_with(&r, "HTTP/1.1 200 OK\r\n"));
+    CHECK("S2 UT-40 Connection: close", has_header_line(&r, "Connection: close"));
+    CHECK("S2 UT-40 헤더의 끝 \\r\\n\\r\\n", body_offset(&r) > 0);
+    free_result(&r);
 }
 
 static void ut41_split(void)
@@ -249,6 +387,7 @@ static void ut41_split(void)
     struct conn_result r;
     run_conn(req, sizeof(req) - 1, strlen("GET / HTTP/1.1\r\n"), &r);
     CHECK("S2 UT-41 나뉘어 와도 200", starts_with(&r, "HTTP/1.1 200 OK\r\n"));
+    free_result(&r);
 }
 
 static void ut42_ut43_ut48_size(void)
@@ -259,6 +398,7 @@ static void ut42_ut43_ut48_size(void)
     if (req != NULL) {
         run_conn(req, 8192, SPLIT_NONE, &r);
         CHECK("S2 UT-42 정확히 8192바이트는 200", starts_with(&r, "HTTP/1.1 200 OK\r\n"));
+        free_result(&r);
         free(req);
     }
 
@@ -266,7 +406,8 @@ static void ut42_ut43_ut48_size(void)
     if (req != NULL) {
         run_conn(req, 8193, SPLIT_NONE, &r);
         CHECK("S2 UT-43 8193바이트는 431", starts_with(&r, "HTTP/1.1 431 Request Header Fields Too Large\r\n"));
-        CHECK("S2 UT-48 drain 뒤 서버 쪽에 남은 데이터 없음 (recv == 0)", r.leftover == 0);
+        CHECK("S2 UT-48 drain 뒤 서버 쪽에 남은 데이터 없음 (recv == 0)", r.leftover_zero);
+        free_result(&r);
         free(req);
     }
 }
@@ -277,6 +418,7 @@ static void ut44_disconnect(void)
     run_conn(REQ("GET / HTTP/1.1\r\n"), SPLIT_NONE, &r);
     CHECK("S2 UT-44 헤더의 끝 전에 끊기면 리턴 -1", r.ret == -1);
     CHECK("S2 UT-44 아무 응답 없음", r.got == 0);
+    free_result(&r);
 }
 
 static void ut45_error_body(void)
@@ -284,15 +426,11 @@ static void ut45_error_body(void)
     struct conn_result r;
     run_conn(REQ("BREW / HTTP/1.1\r\nHost: x\r\n\r\n"), SPLIT_NONE, &r);
     CHECK("S2 UT-45 상태 줄 501", starts_with(&r, "HTTP/1.1 501 Not Implemented\r\n"));
-    CHECK("S2 UT-45 Content-Type: text/plain", strstr(r.out, "\r\nContent-Type: text/plain\r\n") != NULL);
-    CHECK("S2 UT-45 Connection: close", strstr(r.out, "\r\nConnection: close\r\n") != NULL);
-
-    const char *cl = strstr(r.out, "\r\nContent-Length: ");
-    const char *body = strstr(r.out, "\r\n\r\n");
-    long n = cl != NULL ? strtol(cl + strlen("\r\nContent-Length: "), NULL, 10) : -1;
-    size_t body_len = body != NULL ? (size_t)r.got - (size_t)(body + 4 - r.out) : 0;
-    CHECK("S2 UT-45 Content-Length == 본문 바이트 수", body != NULL && n == (long)body_len);
-    CHECK("S2 UT-45 본문 \"501 Not Implemented\\n\"", body != NULL && strcmp(body + 4, "501 Not Implemented\n") == 0);
+    CHECK("S2 UT-45 Content-Type: text/plain", has_header_line(&r, "Content-Type: text/plain"));
+    CHECK("S2 UT-45 Connection: close", has_header_line(&r, "Connection: close"));
+    CHECK("S2 UT-45 본문 \"501 Not Implemented\\n\", Content-Length == 본문 바이트 수",
+          body_equals(&r, REQ("501 Not Implemented\n")));
+    free_result(&r);
 }
 
 static void ut46_version(void)
@@ -300,6 +438,7 @@ static void ut46_version(void)
     struct conn_result r;
     run_conn(REQ("BREW / HTTP/1.0\r\n\r\n"), SPLIT_NONE, &r);
     CHECK("S2 UT-46 요청이 1.0이어도 상태 줄은 HTTP/1.1", starts_with(&r, "HTTP/1.1 501 Not Implemented\r\n"));
+    free_result(&r);
 }
 
 static void ut47_one_response(void)
@@ -307,16 +446,119 @@ static void ut47_one_response(void)
     struct conn_result r;
     run_conn(REQ("GET / HTTP/1.1\r\nHost: x\r\n\r\nGET /next HTTP/1.1\r\nHost: x\r\n\r\n"), SPLIT_NONE, &r);
     CHECK("S2 UT-47 요청이 두 개 붙어 와도 응답은 하나", starts_with(&r, "HTTP/1.1 200 OK\r\n") && count_str(&r, "HTTP/1.1 ") == 1);
+    free_result(&r);
+}
+
+/* ---- Step 3: handle_conn 파일 응답 ---- */
+
+static void ut32_style(void)
+{
+    struct conn_result r;
+    run_conn(REQ("GET /style.css HTTP/1.1\r\nHost: x\r\n\r\n"), SPLIT_NONE, &r);
+    CHECK("S3 UT-32 리턴 0", r.ret == 0);
+    CHECK("S3 UT-32 상태 줄 200", starts_with(&r, "HTTP/1.1 200 OK\r\n"));
+    CHECK("S3 UT-32 Content-Type: text/css; charset=utf-8", has_header_line(&r, "Content-Type: text/css; charset=utf-8"));
+    CHECK("S3 UT-32 Connection: close", has_header_line(&r, "Connection: close"));
+    CHECK("S3 UT-32 본문 == 파일, Content-Length == 파일 크기", body_equals(&r, REQ(STYLE_CSS)));
+    free_result(&r);
+}
+
+static void ut33_index(void)
+{
+    struct conn_result r;
+    run_conn(REQ("GET / HTTP/1.1\r\nHost: x\r\n\r\n"), SPLIT_NONE, &r);
+    char want[256];
+    int n = snprintf(want, sizeof(want),
+                     "HTTP/1.1 200 OK\r\n"
+                     "Content-Type: text/html; charset=utf-8\r\n"
+                     "Content-Length: %zu\r\n"
+                     "Connection: close\r\n"
+                     "\r\n"
+                     "%s",
+                     sizeof(INDEX_HTML) - 1, INDEX_HTML);
+    CHECK("S3 UT-33 / 는 index.html (응답 전체가 정확히 일치)",
+          r.got == n && memcmp(r.out, want, (size_t)n) == 0);
+    free_result(&r);
+}
+
+static void ut34_binary(void)
+{
+    char png[256];
+    for (int i = 0; i < 256; i++)
+        png[i] = (char)i;
+    struct conn_result r;
+    run_conn(REQ("GET /image.png HTTP/1.1\r\nHost: x\r\n\r\n"), SPLIT_NONE, &r);
+    CHECK("S3 UT-34 Content-Type: image/png", has_header_line(&r, "Content-Type: image/png"));
+    CHECK("S3 UT-34 0~255 바이트가 그대로 (\\0 포함)", body_equals(&r, png, sizeof(png)));
+    free_result(&r);
+}
+
+static void ut35_large(void)
+{
+    char *large = malloc(LARGE_SIZE);
+    if (large == NULL)
+        return;
+    for (size_t i = 0; i < LARGE_SIZE; i++)
+        large[i] = pattern_byte(i);
+    struct conn_result r;
+    run_conn(REQ("GET /large.bin HTTP/1.1\r\nHost: x\r\n\r\n"), SPLIT_NONE, &r);
+    CHECK("S3 UT-35 Content-Type: application/octet-stream", has_header_line(&r, "Content-Type: application/octet-stream"));
+    CHECK("S3 UT-35 1MB가 그대로", body_equals(&r, large, LARGE_SIZE));
+    free_result(&r);
+    free(large);
+}
+
+static void ut36_not_found(void)
+{
+    struct conn_result r;
+    run_conn(REQ("GET /nope.html HTTP/1.1\r\nHost: x\r\n\r\n"), SPLIT_NONE, &r);
+    CHECK("S3 UT-36 상태 줄 404", starts_with(&r, "HTTP/1.1 404 Not Found\r\n"));
+    CHECK("S3 UT-36 본문 \"404 Not Found\\n\"", body_equals(&r, REQ("404 Not Found\n")));
+    free_result(&r);
+}
+
+static void ut37_forbidden(void)
+{
+    if (geteuid() == 0) {
+        printf("  skip  S3 UT-37 (root는 권한 000 파일도 읽을 수 있음)\n");
+        return;
+    }
+    struct conn_result r;
+    run_conn(REQ("GET /secret.txt HTTP/1.1\r\nHost: x\r\n\r\n"), SPLIT_NONE, &r);
+    CHECK("S3 UT-37 읽기 권한 없는 파일은 403", starts_with(&r, "HTTP/1.1 403 Forbidden\r\n"));
+    CHECK("S3 UT-37 본문 \"403 Forbidden\\n\"", body_equals(&r, REQ("403 Forbidden\n")));
+    free_result(&r);
+}
+
+static void ut38_traversal(void)
+{
+    struct conn_result r;
+    run_conn(REQ("GET /../../etc/passwd HTTP/1.1\r\nHost: x\r\n\r\n"), SPLIT_NONE, &r);
+    CHECK("S3 UT-38 /../../etc/passwd 는 403", starts_with(&r, "HTTP/1.1 403 Forbidden\r\n"));
+    free_result(&r);
+}
+
+static void ut39_query(void)
+{
+    struct conn_result r;
+    run_conn(REQ("GET /style.css?v=3 HTTP/1.1\r\nHost: x\r\n\r\n"), SPLIT_NONE, &r);
+    CHECK("S3 UT-39 ?v=3 이 붙어도 style.css", starts_with(&r, "HTTP/1.1 200 OK\r\n") && body_equals(&r, REQ(STYLE_CSS)));
+    free_result(&r);
 }
 
 int main(void)
 {
     signal(SIGPIPE, SIG_IGN);   /* 끊긴 소켓에 써도 테스트 프로그램이 죽지 않게 */
-    alarm(20);                  /* handle_conn이 멈추면 테스트를 끝냄 */
+    alarm(30);                  /* handle_conn이 멈추면 테스트를 끝냄 */
 
     printf("test_server\n");
     ut01_to_ut05_listen();
     ut06_low_port();
+
+    if (!make_fixture()) {
+        printf("  FAIL  테스트 루트를 만들지 못함 (%s)\n", g_base);
+        return 1;
+    }
     ut40_ok();
     ut41_split();
     ut42_ut43_ut48_size();
@@ -324,6 +566,17 @@ int main(void)
     ut45_error_body();
     ut46_version();
     ut47_one_response();
+
+    ut32_style();
+    ut33_index();
+    ut34_binary();
+    ut35_large();
+    ut36_not_found();
+    ut37_forbidden();
+    ut38_traversal();
+    ut39_query();
+    remove_fixture();
+
     printf("%d개 중 %d개 통과\n", g_run, g_run - g_fail);
     return g_fail == 0 ? 0 : 1;
 }

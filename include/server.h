@@ -18,11 +18,12 @@ struct conn {
 /* 리슨 소켓을 준비해요. 성공하면 fd, 실패하면 -1 (이유 출력, 소켓 닫음) */
 int server_listen(int port);
 
-/* accept → handle_conn → close를 끝없이 반복해요. 돌아오지 않아요. */
-void server_run(int listen_fd);
+/* accept → handle_conn → close를 끝없이 반복해요. root_real은 정적 파일 루트의 실제 위치. 돌아오지 않아요. */
+void server_run(int listen_fd, const char *root_real);
 
-/* 요청 하나를 읽고 응답 하나를 보낸 뒤 남은 데이터를 비워요. 응답했으면 0, 응답 없이 끝나면 -1. 소켓은 닫지 않아요. */
-int handle_conn(struct conn *c);
+/* 요청 하나를 읽고, root_real 아래 파일이나 오류 응답 하나를 보낸 뒤 남은 데이터를 비워요.
+   응답했으면 0, 응답 없이 끝나거나 보내다 끊기면 -1. 소켓은 닫지 않아요. */
+int handle_conn(struct conn *c, const char *root_real);
 
 /* len바이트를 다 쓸 때까지 write()를 반복해요. 성공 0, 실패 -1 */
 int write_all(int fd, const char *buf, size_t len);
