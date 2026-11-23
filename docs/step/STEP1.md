@@ -90,6 +90,15 @@ TCP에서 먼저 연결을 끊은 쪽은 바로 사라지지 않고 `TIME_WAIT` 
 
 모든 명령은 컨테이너 안에서 실행해요. 터미널 A, B, C는 각각 Mac 터미널에서 `docker compose exec dev bash`로 연 컨테이너 셸이에요.
 
+> **실행 전에 프롬프트를 확인해요.** `dev@xxxx:/app$`면 컨테이너, `lhj@...MacBookAir`면 Mac이에요.
+>
+> | 증상 | 원인 | 해결 |
+> | ---- | ---- | ---- |
+> | `zsh: exec format error: ./webserver` | Mac에서 리눅스용 실행 파일을 실행했어요 | `docker compose exec dev bash`로 컨테이너에 들어가서 실행해요 |
+> | `Cannot connect to the Docker daemon` | Docker Desktop이 꺼져 있어요 | Docker Desktop을 켜고 `docker compose up -d`를 실행해요 |
+> | `service "dev" is not running` | 컨테이너가 꺼져 있어요 | Mac 터미널에서 `docker compose up -d`를 실행해요 |
+> | 컨테이너에서 빌드나 링크 에러가 나요 | Mac에서 `make`를 돌려서 Mac용 빌드가 섞였어요 | 컨테이너에서 `make clean && make`를 실행해요 |
+
 **1. 에코** (터미널 두 개)
 
 ```sh

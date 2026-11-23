@@ -126,6 +126,8 @@ uname -s        # → Linux
 
 다 쓰면 Mac 터미널에서 `docker compose down`으로 컨테이너를 꺼요.
 
+> **실행 전에 프롬프트를 확인해요.** `dev@xxxx:/app$`면 컨테이너, `lhj@...MacBookAir`면 Mac이에요. Mac에서 `./webserver`를 실행하면 `zsh: exec format error`가 나요. 리눅스용 실행 파일이라서예요. Mac에서 `make`를 돌렸다면 컨테이너에서 `make clean && make`로 다시 빌드해요.
+
 **빌드**
 
 ```sh
