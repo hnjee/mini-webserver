@@ -1,0 +1,13 @@
+services:
+  dev:
+    build: .
+    image: mini-webserver-dev
+    container_name: mini-webserver-dev
+    volumes:
+      - .:/app            # Mac에서 고친 파일이 컨테이너에 바로 보인다
+    ports:
+      - "8080:8080"       # Mac 브라우저에서 http://localhost:8080 으로 접속 (Step 3)
+    cap_add:
+      - SYS_PTRACE        # ASan의 누수 검사(LeakSanitizer)와 gdb가 ptrace를 쓴다
+    stdin_open: true
+    tty: true

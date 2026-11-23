@@ -1,0 +1,20 @@
+body {
+  font-family: sans-serif;
+  margin: 2rem;
+  background: #f4f6fb;
+  color: #222;
+}
+
+h1 {
+  color: #2b59c3;
+}
+
+figure {
+  display: inline-block;
+  margin: 0 1rem 1rem 0;
+}
+
+#js-status.ok {
+  color: #1a7f37;
+  font-weight: bold;
+}
