@@ -187,7 +187,7 @@ static void test_write_failure(void)
     close(fds[1]);
 }
 
-/* TC-2-06: 소켓 버퍼보다 큰 본문. 다른 프로세스가 보내고 이 프로세스가 읽는다. 전 바이트 도착만 확인한다(D-23). */
+/* TC-2-06: 소켓 버퍼보다 큰 본문. 다른 프로세스가 보내고 이 프로세스가 읽는다. 전 바이트 도착만 확인한다(D-20). */
 static void test_large_body(void)
 {
     const size_t body_len = 4u * 1024 * 1024;
@@ -353,7 +353,7 @@ static void test_send_status(void)
         check_status_reply(name, cases[i].status, cases[i].line, a.location, reply, reply_len);
     }
 
-    /* PATH_MAX바이트 Location(D-31 머리 버퍼 512 + PATH_MAX) */
+    /* PATH_MAX바이트 Location(D-27 머리 버퍼 512 + PATH_MAX) */
     long_location[0] = '/';
     memset(long_location + 1, 'a', PATH_MAX - 2);
     long_location[PATH_MAX - 1] = '/';

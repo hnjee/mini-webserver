@@ -1,4 +1,4 @@
-/* Step 2·3 단위 테스트: http_conn_serve를 socketpair와 임시 루트로 시험한다(TC-2-07, D-19 보조, TC-3-08, TC-3-10). */
+/* Step 2·3 단위 테스트: http_conn_serve를 socketpair와 임시 루트로 시험한다(TC-2-07, D-17 보조, TC-3-08, TC-3-10). */
 #define _XOPEN_SOURCE 700 /* mkdtemp·realpath */
 
 #include "../src/http_conn.h"
@@ -246,8 +246,8 @@ static void test_close_mid_head(void)
 }
 
 /*
- * D-19 보조: 결과별 상태 코드, 8192바이트로 버퍼가 꽉 찬 경우(0바이트 read 없이 400).
- * D-30 3단계: static_file 결과별 상태 코드. 본문과 Content-Length도 비교한다.
+ * D-17 보조: 결과별 상태 코드, 8192바이트로 버퍼가 꽉 찬 경우(0바이트 read 없이 400).
+ * D-26 3단계: static_file 결과별 상태 코드. 본문과 Content-Length도 비교한다.
  */
 static void test_status_mapping(void)
 {
@@ -257,28 +257,28 @@ static void test_status_mapping(void)
         const char *line;
         const char *body;
     } cases[] = {
-        {"D-19 OK → 200 index.html", "GET / HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 200 OK\r\n", index_body},
-        {"D-19 POST 본문은 읽지 않고 200 index.html (D-37)",
+        {"D-17 OK → 200 index.html", "GET / HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 200 OK\r\n", index_body},
+        {"D-17 POST 본문은 읽지 않고 200 index.html (D-30)",
          "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc", "HTTP/1.1 200 OK\r\n", index_body},
-        {"TC-3-10 POST /index.html 본문 있음 → GET과 같은 200 (D-37)",
+        {"TC-3-10 POST /index.html 본문 있음 → GET과 같은 200 (D-30)",
          "POST /index.html HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nname=hyunji", "HTTP/1.1 200 OK\r\n",
          index_body},
-        {"D-30 REDIRECT → 301", "GET /sub HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 301 Moved Permanently\r\n",
+        {"D-26 REDIRECT → 301", "GET /sub HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 301 Moved Permanently\r\n",
          "301 Moved Permanently\n"},
-        {"D-30 BAD_TARGET → 400", "GET index.html HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 400 Bad Request\r\n",
+        {"D-26 BAD_TARGET → 400", "GET index.html HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 400 Bad Request\r\n",
          "400 Bad Request\n"},
-        {"D-30 FORBIDDEN → 403", "GET /../etc/passwd HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 403 Forbidden\r\n",
+        {"D-26 FORBIDDEN → 403", "GET /../etc/passwd HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 403 Forbidden\r\n",
          "403 Forbidden\n"},
-        {"D-30 NOT_FOUND → 404", "GET /nope.html HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 404 Not Found\r\n",
+        {"D-26 NOT_FOUND → 404", "GET /nope.html HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 404 Not Found\r\n",
          "404 Not Found\n"},
-        {"D-30 ERROR → 500 (ELOOP)", "GET /loop HTTP/1.1\r\nHost: x\r\n\r\n",
+        {"D-26 ERROR → 500 (ELOOP)", "GET /loop HTTP/1.1\r\nHost: x\r\n\r\n",
          "HTTP/1.1 500 Internal Server Error\r\n", "500 Internal Server Error\n"},
-        {"D-44 HEAD / HTTP/1.1 → 501 본문 그대로", "HEAD / HTTP/1.1\r\nHost: x\r\n\r\n",
+        {"D-35 HEAD / HTTP/1.1 → 501 본문 그대로", "HEAD / HTTP/1.1\r\nHost: x\r\n\r\n",
          "HTTP/1.1 501 Not Implemented\r\n", "501 Not Implemented\n"},
-        {"D-19 BAD_REQUEST → 400", "GET / HTTP/1.1\r\n\r\n", "HTTP/1.1 400 Bad Request\r\n", "400 Bad Request\n"},
-        {"D-19 NOT_IMPLEMENTED → 501", "BREW / HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 501 Not Implemented\r\n",
+        {"D-17 BAD_REQUEST → 400", "GET / HTTP/1.1\r\n\r\n", "HTTP/1.1 400 Bad Request\r\n", "400 Bad Request\n"},
+        {"D-17 NOT_IMPLEMENTED → 501", "BREW / HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 501 Not Implemented\r\n",
          "501 Not Implemented\n"},
-        {"D-19 VERSION_NOT_SUPPORTED → 505", "GET / HTTP/2.0\r\nHost: x\r\n\r\n",
+        {"D-17 VERSION_NOT_SUPPORTED → 505", "GET / HTTP/2.0\r\nHost: x\r\n\r\n",
          "HTTP/1.1 505 HTTP Version Not Supported\r\n", "505 HTTP Version Not Supported\n"},
     };
     static char reply[4096], full[HTTP_REQUEST_HEAD_MAX];
@@ -302,17 +302,17 @@ static void test_status_mapping(void)
         const char req[] = "GET //sub?v=1 HTTP/1.1\r\nHost: x\r\n\r\n";
         r = serve_prewritten(req, sizeof(req) - 1, reply, sizeof(reply));
     }
-    check("D-30 301 Location: /sub/ (C1, D-42)",
+    check("D-26 301 Location: /sub/ (C1, D-24)",
           r == HTTP_CONN_RESPONDED && strstr(reply, "\r\nLocation: /sub/\r\nConnection: close\r\n") != NULL, reply);
 
     memset(full, 'a', sizeof(full));
     r = serve_prewritten(full, sizeof(full), reply, sizeof(reply));
-    check("D-19 종료 없이 8192바이트 → 400 (0바이트 read 없음)",
+    check("D-17 종료 없이 8192바이트 → 400 (0바이트 read 없음)",
           r == HTTP_CONN_RESPONDED && starts_with(reply, "HTTP/1.1 400 Bad Request\r\n"),
           r == HTTP_CONN_PEER_CLOSED ? "PEER_CLOSED로 끝났다" : "400 응답이 아니다");
 }
 
-/* D-19·D-33: 파일 응답의 머리 쓰기 실패. 파일은 열렸으므로 fd 누수도 본다(TC-3-08). */
+/* D-17·D-29: 파일 응답의 머리 쓰기 실패. 파일은 열렸으므로 fd 누수도 본다(TC-3-08). */
 static void test_write_failure(void)
 {
     const char req[] = "GET / HTTP/1.1\r\nHost: x\r\n\r\n";
@@ -328,7 +328,7 @@ static void test_write_failure(void)
     err = errno;
     check("TC-3-08 머리 쓰기 실패 뒤 파일 fd 누수 없음", lowest_free_fd() == before, "열린 fd가 남았다");
     close(fds[1]);
-    check("D-19 응답(파일 머리) 쓰기 실패 ERROR, errno EPIPE", r == HTTP_CONN_ERROR && err == EPIPE, strerror(err));
+    check("D-17 응답(파일 머리) 쓰기 실패 ERROR, errno EPIPE", r == HTTP_CONN_ERROR && err == EPIPE, strerror(err));
 }
 
 /* TC-3-10: 64KB를 여러 번 넘는 파일을 다른 프로세스가 서버로 보내고 이 프로세스가 읽어 바이트 비교. */

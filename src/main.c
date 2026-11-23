@@ -56,7 +56,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    /* D-30: 루트를 한 번 정규화한다. 이 문자열은 프로세스 수명 동안 쓰므로 해제하지 않는다. */
+    /* D-26: 루트를 한 번 정규화한다. 이 문자열은 프로세스 수명 동안 쓰므로 해제하지 않는다. */
     root = realpath(config.root, NULL);
     if (root == NULL) {
         fprintf(stderr, "오류: 루트 %s 를 정규화할 수 없다: %s\n", config.root, strerror(errno));

@@ -1,5 +1,5 @@
-/* Step 3 단위 테스트: static_file (TC-3-06 D-32 표, TC-3-07 접두 경계, TC-3-08 fd 누수, TC-3-19 접두 비교). */
-#define _XOPEN_SOURCE 700 /* realpath·PATH_MAX (D-36 I1) */
+/* Step 3 단위 테스트: static_file (TC-3-06 D-28 표, TC-3-07 접두 경계, TC-3-08 fd 누수, TC-3-19 접두 비교). */
+#define _XOPEN_SOURCE 700 /* realpath·PATH_MAX (설계 재검토 I1) */
 
 #include "../src/static_file.h"
 
@@ -263,7 +263,7 @@ static void test_open_rules(void)
     expect_open("TC-3-06 7행 / → index.html", root, "/", STATIC_FILE_OK, (long)sizeof(index_body) - 1, html, NULL);
     expect_open("TC-3-06 7행 /sub 301", root, "/sub", STATIC_FILE_REDIRECT, 0, NULL, "/sub/");
     expect_open("TC-3-06 7행 //sub 301 (C1)", root, "//sub", STATIC_FILE_REDIRECT, 0, NULL, "/sub/");
-    expect_open("TC-3-06 7행 /sub?v=1 301 쿼리 없음 (D-42)", root, "/sub?v=1", STATIC_FILE_REDIRECT, 0, NULL,
+    expect_open("TC-3-06 7행 /sub?v=1 301 쿼리 없음 (D-24)", root, "/sub?v=1", STATIC_FILE_REDIRECT, 0, NULL,
                 "/sub/");
     expect_open("TC-3-06 7행 //inner (디렉터리 링크) 301", root, "//inner", STATIC_FILE_REDIRECT, 0, NULL,
                 "/inner/");
@@ -273,7 +273,7 @@ static void test_open_rules(void)
     expect_open("TC-3-06 7행 index 없는 /emptydir/ 403", root, "/emptydir/", STATIC_FILE_FORBIDDEN, 0, NULL, NULL);
     expect_open("TC-3-06 7행 index.html이 디렉터리 403", root, "/idxdir/", STATIC_FILE_FORBIDDEN, 0, NULL, NULL);
     /* 8행: 일반 파일이 아닌 대상 (멈추면 alarm으로 실패) */
-    expect_open("TC-3-06 8행 FIFO 403, 멈추지 않음 (D-38)", root, "/fifo", STATIC_FILE_FORBIDDEN, 0, NULL, NULL);
+    expect_open("TC-3-06 8행 FIFO 403, 멈추지 않음 (D-31)", root, "/fifo", STATIC_FILE_FORBIDDEN, 0, NULL, NULL);
     /* 9행: open */
     if (root_user) {
         printf("  건너뜀 TC-3-06 9행 권한 000 파일 403 (root로 실행)\n");
@@ -282,13 +282,13 @@ static void test_open_rules(void)
         expect_open("TC-3-06 9행 권한 000 파일 403 (EACCES)", root, "/secret.txt", STATIC_FILE_FORBIDDEN, 0, NULL,
                     NULL);
     }
-    /* 10행·MIME(D-43) */
+    /* 10행·MIME(D-34) */
     expect_open("TC-3-06 10행 빈 파일 크기 0", root, "/empty.txt", STATIC_FILE_OK, 0, NULL, NULL);
-    expect_open("TC-3-06 D-43 page.html -> data는 text/html", root, "/page.html", STATIC_FILE_OK,
+    expect_open("TC-3-06 D-34 page.html -> data는 text/html", root, "/page.html", STATIC_FILE_OK,
                 (long)sizeof(data_body) - 1, html, NULL);
-    expect_open("TC-3-06 D-43 /data는 octet-stream", root, "/data", STATIC_FILE_OK, (long)sizeof(data_body) - 1,
+    expect_open("TC-3-06 D-34 /data는 octet-stream", root, "/data", STATIC_FILE_OK, (long)sizeof(data_body) - 1,
                 "application/octet-stream", NULL);
-    /* 루트가 "/"인 경우(D-30 예외): 절대 경로로 같은 파일을 연다 */
+    /* 루트가 "/"인 경우(D-26 예외): 절대 경로로 같은 파일을 연다 */
     snprintf(p, sizeof(p), "%s/a.txt", root);
     expect_open("TC-3-06 루트 / 에서 절대 경로", "/", p, STATIC_FILE_OK, 6, NULL, NULL);
 }

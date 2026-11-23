@@ -13,7 +13,7 @@ static http_conn_result done(int rc)
     return rc == 0 ? HTTP_CONN_RESPONDED : HTTP_CONN_ERROR;
 }
 
-/* D-30 3·4단계: static_file 결과를 상태 코드로 바꾸고, 200이면 머리 → 본문 → 파일 fd 닫기(D-33). */
+/* D-26 3·4단계: static_file 결과를 상태 코드로 바꾸고, 200이면 머리 → 본문 → 파일 fd 닫기(D-29). */
 static http_conn_result serve_file(int fd, const char *root, const char *target)
 {
     static_file file;
@@ -47,7 +47,7 @@ http_conn_result http_conn_serve(int fd, const char *root)
     size_t len = 0;
     int status;
 
-    /* 파서는 len < HTTP_REQUEST_HEAD_MAX에서만 INCOMPLETE를 돌려주므로 남은 칸은 항상 1 이상이다(D-15, D-19). */
+    /* 파서는 len < HTTP_REQUEST_HEAD_MAX에서만 INCOMPLETE를 돌려주므로 남은 칸은 항상 1 이상이다(D-14, D-17). */
     for (;;) {
         ssize_t n = read(fd, buffer + len, sizeof(buffer) - len);
         if (n == 0) {
@@ -66,7 +66,7 @@ http_conn_result http_conn_serve(int fd, const char *root)
         }
     }
     if (result == HTTP_PARSE_OK) {
-        return serve_file(fd, root, request.target); /* GET·POST를 같이 처리한다(D-37) */
+        return serve_file(fd, root, request.target); /* GET·POST를 같이 처리한다(D-30) */
     }
     switch (result) {
     case HTTP_PARSE_NOT_IMPLEMENTED: status = 501; break;
@@ -74,5 +74,5 @@ http_conn_result http_conn_serve(int fd, const char *root)
     case HTTP_PARSE_BAD_REQUEST:
     default: status = 400; break;
     }
-    return done(http_response_send_status(fd, status, NULL)); /* HEAD도 501 + 본문(D-44) */
+    return done(http_response_send_status(fd, status, NULL)); /* HEAD도 501 + 본문(D-35) */
 }

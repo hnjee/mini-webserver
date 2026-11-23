@@ -29,7 +29,7 @@ static size_t find_head_end(const char *data, size_t len)
     return 0;
 }
 
-/* D-16 1행: NUL, 뒤에 \n 없는 \r, \r 없는 \n이 있으면 0. 범위의 마지막 \r은 다음 바이트를 기다린다. */
+/* D-15 1행: NUL, 뒤에 \n 없는 \r, \r 없는 \n이 있으면 0. 범위의 마지막 \r은 다음 바이트를 기다린다. */
 static int line_breaks_ok(const char *data, size_t len)
 {
     size_t i;
@@ -58,7 +58,7 @@ static const char *copy_out(char **cursor, const char *src, size_t n)
     return dst;
 }
 
-/* line[0..len)은 \r\n을 뺀 요청 줄. D-16 2~5행을 검사하고, 통과하면 out에 복사한다. */
+/* line[0..len)은 \r\n을 뺀 요청 줄. D-15 2~5행을 검사하고, 통과하면 out에 복사한다. */
 static http_parse_result parse_request_line(const char *line, size_t len, http_request *out,
                                             char **cursor)
 {
@@ -113,7 +113,7 @@ static http_parse_result parse_request_line(const char *line, size_t len, http_r
     return HTTP_PARSE_OK;
 }
 
-/* line[0..len)은 \r\n을 뺀 헤더 줄. D-16 6~7행을 검사하고, 통과하면 out에 덧붙인다. */
+/* line[0..len)은 \r\n을 뺀 헤더 줄. D-15 6~7행을 검사하고, 통과하면 out에 덧붙인다. */
 static http_parse_result parse_header_line(const char *line, size_t len, http_request *out,
                                            char **cursor)
 {
@@ -149,7 +149,7 @@ static http_parse_result parse_header_line(const char *line, size_t len, http_re
 }
 
 /*
- * head[0..len)은 \r\n\r\n으로 끝나고 줄 바꿈 검사를 통과한 머리(모든 \r 뒤에 \n). D-16 2~9행.
+ * head[0..len)은 \r\n\r\n으로 끝나고 줄 바꿈 검사를 통과한 머리(모든 \r 뒤에 \n). D-15 2~9행.
  * 줄마다 구분자(공백·콜론·\r\n) 자리를 NUL로 쓰므로 복사본 합계는 len보다 작아 storage가 넘치지 않는다.
  */
 static http_parse_result parse_head(const char *head, size_t len, http_request *out)

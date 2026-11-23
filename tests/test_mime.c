@@ -1,4 +1,4 @@
-/* Step 3 단위 테스트: mime_type_for (TC-3-05, D-29·D-35 표). */
+/* Step 3 단위 테스트: mime_type_for (TC-3-05, D-25 표). */
 #include "../src/mime.h"
 
 #include <stdio.h>

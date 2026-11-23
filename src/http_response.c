@@ -27,7 +27,7 @@ int http_response_send_head(int fd, int status, const char *content_type,
                             size_t content_length, const char *location)
 {
     const char *reason = reason_phrase(status);
-    char date[64], head[512 + PATH_MAX]; /* 고정 부분 512바이트 + Location 값 PATH_MAX바이트(D-31) */
+    char date[64], head[512 + PATH_MAX]; /* 고정 부분 512바이트 + Location 값 PATH_MAX바이트(D-27) */
     struct tm tm;
     time_t now;
     int n;
@@ -78,7 +78,7 @@ int http_response_send_status(int fd, int status, const char *location)
         errno = EINVAL;
         return -1;
     }
-    /* 본문과 Content-Length가 같은 n에서 나온다(D-40). */
+    /* 본문과 Content-Length가 같은 n에서 나온다(D-33). */
     n = snprintf(body, sizeof(body), "%d %s\n", status, reason);
     if (http_response_send_head(fd, status, "text/plain; charset=utf-8", (size_t)n, location) != 0) {
         return -1;

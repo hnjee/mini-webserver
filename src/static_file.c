@@ -1,4 +1,4 @@
-#define _XOPEN_SOURCE 700 /* realpath는 XSI 함수다. 없으면 암묵 선언으로 64비트 포인터가 잘릴 수 있다(D-36 I1). */
+#define _XOPEN_SOURCE 700 /* realpath는 XSI 함수다. 없으면 암묵 선언으로 64비트 포인터가 잘릴 수 있다(설계 재검토 I1). */
 
 #include "static_file.h"
 #include "io.h"
@@ -13,7 +13,7 @@
 
 static const char index_name[] = "/index.html";
 
-/* path[0..len)를 '/'로 나눈 조각 중 정확히 ".."인 것이 있는가(D-24, D-32 3행). */
+/* path[0..len)를 '/'로 나눈 조각 중 정확히 ".."인 것이 있는가(D-21, D-28 3행). */
 static int has_dotdot(const char *path, size_t len)
 {
     size_t i = 0;
@@ -30,7 +30,7 @@ static int has_dotdot(const char *path, size_t len)
     return 0;
 }
 
-/* realpath·stat 실패의 errno를 결과로 바꾼다(D-32 5행). index 재해석 중이면 없음도 403(7행). */
+/* realpath·stat 실패의 errno를 결과로 바꾼다(D-28 5행). index 재해석 중이면 없음도 403(7행). */
 static static_file_result lookup_error(int err, int in_index)
 {
     switch (err) {
@@ -40,14 +40,14 @@ static static_file_result lookup_error(int err, int in_index)
     case EACCES:
         return STATIC_FILE_FORBIDDEN;
     case ENAMETOOLONG:
-        return STATIC_FILE_BAD_TARGET; /* D-41 */
+        return STATIC_FILE_BAD_TARGET; /* D-23 */
     default:
         return STATIC_FILE_ERROR; /* errno는 그대로다 */
     }
 }
 
 /*
- * D-32 5~6행과 7·8행의 stat: path를 resolved로 정규화하고, 루트 안인지 보고 stat한다.
+ * D-28 5~6행과 7·8행의 stat: path를 resolved로 정규화하고, 루트 안인지 보고 stat한다.
  * 성공이면 STATIC_FILE_OK. path와 resolved는 모두 PATH_MAX 크기다.
  */
 static static_file_result resolve(const char *root, const char *path, char *resolved, struct stat *st,
@@ -65,7 +65,7 @@ static static_file_result resolve(const char *root, const char *path, char *reso
     return STATIC_FILE_OK;
 }
 
-/* 요청 경로 path[0..len)의 연속된 '/'를 하나로 줄이고 끝에 '/'를 붙인다(D-31, C1). */
+/* 요청 경로 path[0..len)의 연속된 '/'를 하나로 줄이고 끝에 '/'를 붙인다(D-27, C1). */
 static void make_location(char *out, const char *path, size_t len)
 {
     size_t i, n = 0;
@@ -114,7 +114,7 @@ static_file_result static_file_open(const char *root, const char *target, static
     memcpy(path, root, root_len);
     memcpy(path + root_len, target, path_len);
     path[root_len + path_len] = '\0';
-    content_type = mime_type_for(path); /* D-43: 루트 뒤가 요청 경로이므로 마지막 이름은 요청의 것이다 */
+    content_type = mime_type_for(path); /* D-34: 루트 뒤가 요청 경로이므로 마지막 이름은 요청의 것이다 */
 
     r = resolve(root, path, resolved, &st, 0); /* 5·6행 */
     if (r != STATIC_FILE_OK) {
@@ -127,7 +127,7 @@ static_file_result static_file_open(const char *root, const char *target, static
         }
         resolved_len = strlen(resolved);
         if (resolved_len + sizeof(index_name) > PATH_MAX) { /* sizeof는 NUL을 포함한다 */
-            return STATIC_FILE_BAD_TARGET;                 /* D-41, 코드 검토 항목 */
+            return STATIC_FILE_BAD_TARGET;                 /* D-23, 코드 검토 항목 */
         }
         memcpy(path, resolved, resolved_len);
         memcpy(path + resolved_len, index_name, sizeof(index_name));
@@ -140,7 +140,7 @@ static_file_result static_file_open(const char *root, const char *target, static
             return STATIC_FILE_FORBIDDEN;
         }
     }
-    if (!S_ISREG(st.st_mode)) { /* 8행, D-38 */
+    if (!S_ISREG(st.st_mode)) { /* 8행, D-31 */
         return STATIC_FILE_FORBIDDEN;
     }
     /* 9행: O_NONBLOCK은 검사 뒤 FIFO로 바뀌어도 open이 멈추지 않게 한다. 일반 파일 read에는 영향이 없다. */
@@ -182,7 +182,7 @@ int static_file_send_body(int out_fd, const static_file *file)
             return -1;
         }
         if (n == 0) {
-            errno = EIO; /* size에 닿기 전에 파일 끝: 전송 중 파일이 줄었다(D-33) */
+            errno = EIO; /* size에 닿기 전에 파일 끝: 전송 중 파일이 줄었다(D-29) */
             return -1;
         }
         if (io_write_all(out_fd, buffer, (size_t)n) != 0) {

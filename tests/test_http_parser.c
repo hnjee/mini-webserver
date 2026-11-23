@@ -1,4 +1,4 @@
-/* Step 2 단위 테스트: http_parser를 소켓 없이 직접 호출한다(TC-2-04, D-16·D-20 표). */
+/* Step 2 단위 테스트: http_parser를 소켓 없이 직접 호출한다(TC-2-04, D-15 표·README 3장). */
 #include "../src/http_parser.h"
 
 #include <stdio.h>

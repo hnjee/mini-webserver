@@ -1,5 +1,5 @@
 # 기본 빌드, 디버그(ASan) 빌드, 단위 테스트, 공통 테스트 파일, SO_REUSEADDR 실험(Step 1).
-# echo 모듈은 서버 소스에서 빠졌고 Step 1 회귀 시험(test_echo)에만 쓴다(D-14).
+# echo 모듈은 서버 소스에서 빠졌고 Step 1 회귀 시험(test_echo)에만 쓴다(D-13).
 CC      ?= cc
 CSTD    ?= -std=c11
 WARN    ?= -Wall -Wextra -Wpedantic
@@ -83,7 +83,7 @@ $(EXPERIMENT): experiments/bind_no_reuse.c $(BUILD_STAMP)
 # 테스트용 www는 컨테이너 내부 Linux 전용 폴더에 만든다. bind mount(Docker Desktop)는 권한 000을 실제로 강제하지 못한다.
 # 폴더 위치와 large.bin 크기(4MB)는 recipe 안의 고정값이다(make 변수로 덮어쓸 수 없다).
 # 같은 컨테이너에서는 이 폴더를 재사용하고 아래 7개 파일과 sub/index.html만 rm -f 후 새로 쓴다(링크면 링크만 지워진다).
-# 하위 폴더 sub/, empty/는 만들기만 하고 empty/index.html은 지운다(D-39). 링크이거나 폴더가 아니면 실패한다.
+# 하위 폴더 sub/, empty/는 만들기만 하고 empty/index.html은 지운다(D-32). 링크이거나 폴더가 아니면 실패한다.
 # 호스트 $(WWW)/는 읽기만 한다. stdout에는 폴더 경로 한 줄만 쓴다: dir=$$(make -s fixtures)
 FIXTURE_COPY = index.html style.css app.js image.png photo.jpg sub/index.html
 

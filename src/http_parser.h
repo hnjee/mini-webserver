@@ -3,8 +3,8 @@
 
 #include <stddef.h>
 
-#define HTTP_REQUEST_HEAD_MAX 8192 /* D-10, D-11: 종료 빈 줄 포함 요청 머리 최대 길이 */
-#define HTTP_MAX_HEADERS      100  /* D-17 */
+#define HTTP_REQUEST_HEAD_MAX 8192 /* D-09, D-10: 종료 빈 줄 포함 요청 머리 최대 길이 */
+#define HTTP_MAX_HEADERS      100  /* D-15 */
 
 typedef enum {
     HTTP_PARSE_INCOMPLETE,           /* 아직 \r\n\r\n 없음, 더 읽어야 함 */
@@ -29,7 +29,7 @@ typedef struct {
 } http_request;
 
 /*
- * data[0..len)은 그 연결에서 지금까지 받은 바이트 전체다(D-15). I/O·할당·전역 상태가 없다.
+ * data[0..len)은 그 연결에서 지금까지 받은 바이트 전체다(D-14). I/O·할당·전역 상태가 없다.
  * INCOMPLETE는 len < HTTP_REQUEST_HEAD_MAX에서만 나온다. out은 OK일 때만 유효하다.
  */
 http_parse_result http_parse_request(const char *data, size_t len, http_request *out);
