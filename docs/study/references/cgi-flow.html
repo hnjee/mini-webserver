@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CGI 전체 동작 (fd 변화)</title>
+<style>
+body{margin:0;padding:28px 20px 48px;background:var(--bg);color:var(--text);font-family:"Pretendard","Apple SD Gothic Neo","Noto Sans KR",system-ui,sans-serif}
+.wrap{margin:0 auto}
+h1{font-size:22px;font-weight:600;margin:0 auto 16px;max-width:960px}
+</style>
+</head>
+<body>
+<h1>CGI 전체 동작: fd와 실행 코드의 변화</h1>
+<style>
+:root{
+  --bg:#f7f6f2;--card:#ffffff;--text:#1f1f1d;--muted:#7a7972;--line:#e2e0d8;
+  --mint-f:#DDF7F3;--mint-s:#3CC5B5;--mint-t:#0B5F58;
+  --blue-f:#E6F1FB;--blue-s:#378ADD;--blue-t:#0C447C;
+  --purple-f:#EEEDFE;--purple-s:#7F77DD;--purple-t:#3C3489;
+  --pink-f:#FCE8F3;--pink-s:#E879B9;--pink-t:#82205F;
+}
+@media (prefers-color-scheme: dark){:root{
+  --bg:#1b1b19;--card:#252523;--text:#ecebe6;--muted:#a3a19a;--line:#3a3936;
+  --mint-f:#0F3330;--mint-s:#5FE0D0;--mint-t:#A4F0E6;
+  --blue-f:#10263f;--blue-s:#85B7EB;--blue-t:#B5D4F4;
+  --purple-f:#2a2747;--purple-s:#AFA9EC;--purple-t:#CECBF6;
+  --pink-f:#3A1A31;--pink-s:#F29BCF;--pink-t:#F9C8E5;
+}}
+.wrap{max-width:960px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;color:var(--text);font-size:14px}
+.bar{display:flex;gap:8px;align-items:center;margin:0 0 10px 0;flex-wrap:wrap}
+.btn{font:inherit;font-size:14px;border:1px solid var(--line);background:var(--card);color:var(--text);padding:6px 14px;border-radius:8px;cursor:pointer}
+.btn.on{background:var(--text);color:var(--card);border-color:var(--text)}
+.btn:disabled{opacity:.35;cursor:default}
+.step{color:var(--muted);font-size:13px}
+.caller{display:inline-block;padding:3px 10px;border-radius:12px;background:var(--purple-f);border:1px solid var(--purple-s);color:var(--purple-t);font-weight:600;font-size:13px}
+.desc{margin-top:8px;line-height:1.65}
+svg{width:100%;height:auto;display:block}
+svg text{fill:var(--text);font-size:13px}
+svg .muted{fill:var(--muted);font-size:12px}
+svg .t-p{fill:var(--purple-t)} svg .t-r{fill:var(--pink-t)} svg .t-k{fill:var(--mint-t)} svg .t-b{fill:var(--blue-t)}
+.pbox.s{fill:var(--purple-f);stroke:var(--purple-s);stroke-width:1.5}
+.pbox.c{fill:var(--pink-f);stroke:var(--pink-s);stroke-width:1.5}
+.slot{fill:var(--card);stroke-width:1.5}
+.slot.s{stroke:var(--purple-s)} .slot.c{stroke:var(--pink-s)}
+.slot.hl{stroke-width:3.5}
+.arr{fill:none;stroke-width:1.8}
+.arr.s{stroke:var(--purple-s)} .arr.c{stroke:var(--pink-s)}
+.arr.hl{stroke-width:4}
+.obj{fill:var(--mint-f);stroke:var(--mint-s);stroke-width:1.5}
+.obj.buf{stroke-width:2.5}
+.kbox{fill:none;stroke:var(--mint-s);stroke-width:1.5;stroke-dasharray:6 4}
+.flow{stroke:var(--mint-s);stroke-width:1.5;fill:none}
+.disk{fill:var(--blue-f);stroke:var(--blue-s);stroke-width:1.5}
+.load{fill:none;stroke:var(--blue-s);stroke-width:1.8;stroke-dasharray:5 4}
+.load.hl{stroke-width:4}
+.act{fill:var(--blue-f);stroke:var(--blue-s);stroke-width:1.5}
+.cap{fill:var(--card);stroke-width:1.5}
+.cap.p{stroke:var(--purple-s)} .cap.b{stroke:var(--blue-s)} .cap.m{stroke:var(--line)}
+.cap.hl{stroke-width:4}
+.gotbox{fill:var(--card);stroke:var(--purple-s);stroke-width:1.5}
+</style>
+<div class="wrap">
+  <div class="bar">
+    <button class="btn" id="prev">이전</button>
+    <button class="btn on" id="next">다음 단계</button>
+    <span class="step" id="stepno"></span>
+  </div>
+  <svg id="svg" viewBox="0 0 980 445" role="img" aria-label="CGI 전체 동작"></svg>
+  <div><span class="caller" id="caller"></span></div>
+  <div class="desc" id="desc"></div>
+</div>
+<script>
+(function(){
+  var slotC = {1:73, 4:133, 6:220, 5:315};
+  var objs = {
+    term:{x:320,y:55,w:160,h:36,t:'터미널(화면)'},
+    sock:{x:320,y:115,w:160,h:36,t:'클라이언트 연결 소켓'}
+  };
+  var endY = function(target, fd){
+    if(target==='term') return 73;
+    if(target==='sock') return 133;
+    if(target==='wr') return fd===1 ? 212 : 228;
+    if(target==='rd') return 315;
+  };
+  var A_RUN = ['CGI 프로그램의','코드가 실행되기 시작'];
+  var A_WORK = ['① 시각 등을 계산','(애플리케이션 로직)','② printf 로 출력'];
+  var steps = [
+    { caller:'시작 상태', server:{1:'term',4:'sock'}, child:null, pipe:false, buf:'', got:'', hl:[], load:0,
+      desc:'서버가 accept로 클라이언트 연결(fd 4)을 받고 요청을 읽었습니다. 요청 경로가 CGI 프로그램(디스크의 실행 파일, 경로는 설명용)을 가리키므로 서버는 그것을 실행해야 한다고 판단한 상태입니다. fd 1은 서버의 표준 출력으로, 터미널을 가리킵니다.' },
+    { caller:'서버가 pipe() 호출', server:{1:'term',4:'sock',6:'wr',5:'rd'}, child:null, pipe:true, buf:'', got:'', hl:['s5','s6'], load:0,
+      desc:'CGI 프로그램의 출력을 받을 통로를 준비합니다. 커널 메모리에 빈 바이트 버퍼와 입구 두 개가 생겼고, 서버의 fd 6이 쓰기 입구를, fd 5가 읽기 입구를 가리킵니다.' },
+    { caller:'서버가 fork() 호출', server:{1:'term',4:'sock',6:'wr',5:'rd'}, child:{1:'term',4:'sock',6:'wr',5:'rd'}, label:'서버 복제본', cap:{now:'서버 코드 (복제본)', kind:'p'}, pipe:true, buf:'', got:'', hl:['c1','c4','c5','c6'], load:0,
+      desc:'서버를 복제한 자식 프로세스가 생겼습니다. 번호표(fd)가 복사되어 자식의 fd 6도 서버와 같은 쓰기 입구를 가리킵니다. 아직 자식이 실행 중인 코드는 서버 코드입니다.' },
+    { caller:'자식이 dup2(6, 1) 호출', server:{1:'term',4:'sock',6:'wr',5:'rd'}, child:{1:'wr',4:'sock',6:'wr',5:'rd'}, label:'서버 복제본', cap:{now:'서버 코드 (복제본)', kind:'p'}, pipe:true, buf:'', got:'', hl:['c1'], load:0,
+      desc:'자식의 fd 1 화살표가 터미널에서 파이프 쓰기 입구로 옮겨졌습니다. 이제 이 자식이 표준 출력(fd 1)에 쓰는 것은 파이프로 들어갑니다. 서버의 fd 1은 그대로입니다.' },
+    { caller:'자식이 close() 후 exec() 호출', server:{1:'term',4:'sock',6:'wr',5:'rd'}, child:{1:'wr'}, label:'CGI 프로그램 실행 중', cap:{old:'서버 코드', now:'CGI 프로그램 코드', kind:'b'}, act:A_RUN, pipe:true, buf:'', got:'', hl:['c1'], load:2,
+      desc:'자식이 필요 없는 번호표(4, 5, 6)를 닫고 exec를 호출했습니다. 아래쪽 디스크의 CGI 프로그램 파일에서 코드를 불러오면, 자식 프로세스라는 틀(PID, fd 표)은 그대로 두고 그 안에서 실행 중이던 서버 코드가 CGI 프로그램 코드로 교체됩니다. 교체된 뒤에는 서버 코드가 남아 있지 않습니다.' },
+    { caller:'서버가 close(6) 호출', server:{1:'term',4:'sock',5:'rd'}, child:{1:'wr'}, label:'CGI 프로그램 실행 중', cap:{now:'CGI 프로그램 코드', kind:'b'}, act:A_RUN, pipe:true, buf:'', got:'', hl:[], load:1,
+      desc:'서버가 자신의 쓰기 번호표를 닫았습니다. 이제 쓰기 입구를 가리키는 번호표는 CGI 프로그램 쪽 fd 1 하나뿐입니다. 이 정리가 있어야 CGI가 끝났을 때 서버가 출력의 끝을 알 수 있습니다(세부는 나중에 다시 설명).' },
+    { caller:'CGI 프로그램이 로직을 실행하고 printf', server:{1:'term',4:'sock',5:'rd'}, child:{1:'wr'}, label:'CGI 프로그램 실행 중', cap:{now:'CGI 프로그램 코드', kind:'b'}, act:A_WORK, pipe:true, buf:'hi', got:'', hl:['c1'], load:1,
+      desc:'CGI 프로그램이 자기 일(애플리케이션 로직)을 수행해 응답 내용을 만들고 printf로 출력합니다. fd 1이 파이프를 가리키므로 글자가 파이프 버퍼에 들어가고 터미널에는 나타나지 않습니다. 버퍼의 hi는 출력 글자를 단순화한 것입니다.' },
+    { caller:'서버가 read(5, ...) 호출', server:{1:'term',4:'sock',5:'rd'}, child:{1:'wr'}, label:'CGI 프로그램 실행 중', cap:{now:'CGI 프로그램 코드', kind:'b'}, act:A_WORK, pipe:true, buf:'', got:'hi', hl:['s5'], load:1,
+      desc:'서버가 fd 5(읽기 입구)로 버퍼에서 글자를 꺼내 자기 메모리로 복사했습니다. 서버는 CGI 프로그램의 출력을 이제 자기 손에 가졌습니다.' },
+    { caller:'CGI 프로그램 종료, 서버가 read 0 확인 후 waitpid', server:{1:'term',4:'sock',5:'rd'}, child:{}, label:'종료됨', cap:{now:'(종료됨)', kind:'m'}, act:['프로그램이 끝나','프로세스가 종료됨'], pipe:true, buf:'', got:'hi', hl:['s5'], load:0,
+      desc:'CGI 프로그램이 끝나면 자식 프로세스가 종료되고 쓰기 번호표가 모두 사라집니다. 버퍼가 비어 있으므로 서버의 read가 0을 반환해 출력 끝을 알립니다. 서버는 waitpid로 자식을 회수합니다.' },
+    { caller:'서버가 close(5) 후 fd 4로 응답 write', server:{1:'term',4:'sock'}, child:null, pipe:false, buf:'', got:'hi', hl:['s4'], load:0,
+      desc:'서버가 받은 글자를 응답 내용으로 삼아 상태 줄과 필요한 헤더를 붙인 뒤, 연결 소켓(fd 4)으로 write해 브라우저에 보냅니다. 어디까지를 서버가 붙이는지는 구현 선택이며 프로젝트는 확인하지 않았습니다. 파이프는 더 이상 필요 없어 사라졌습니다.' }
+  ];
+  var i = 0;
+  var svg = document.getElementById('svg');
+  function T(cls,x,y,txt,extra){
+    return '<text class="'+cls+'" x="'+x+'" y="'+y+'" text-anchor="middle"'+(extra?' style="'+extra+'"':'')+'>'+txt+'</text>';
+  }
+  function arrow(x1,y1,x2,y2,side,hl){
+    return '<line class="arr '+side+(hl?' hl':'')+'" x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" marker-end="url(#m'+side+')"/>';
+  }
+  function proc(side, fds, label1, label2, hl, cap){
+    var bx = side==='s' ? 20 : 610; var bw = side==='s' ? 140 : 170;
+    var sx = side==='s' ? 30 : 650;
+    var mid = bx+bw/2;
+    var out = '<rect class="pbox '+side+'" x="'+bx+'" y="10" width="'+bw+'" height="425" rx="10"/>';
+    out += T(side==='s'?'t-p':'t-r', mid, 28, label1, 'font-weight:600');
+    out += T('muted', mid, 43, label2);
+    [1,4,6,5].forEach(function(fd){
+      if(!(fd in fds)) return;
+      var h = hl.indexOf(side+fd)>=0;
+      var cy = slotC[fd];
+      out += '<rect class="slot '+side+(h?' hl':'')+'" x="'+sx+'" y="'+(cy-18)+'" width="100" height="36" rx="6"/>';
+      out += T(side==='s'?'t-p':'t-r', sx+50, cy+5, 'fd '+fd);
+      var ty = endY(fds[fd], fd);
+      if(side==='s') out += arrow(sx+100, cy, 320, ty, side, h);
+      else out += arrow(sx, cy, 480, ty, side, h);
+    });
+    if(cap){
+      var cx = bx+10, cw = bw-20;
+      var tc = cap.kind==='p' ? 't-p' : cap.kind==='b' ? 't-b' : 'muted';
+      out += '<rect class="cap '+cap.kind+(cap.old?' hl':'')+'" x="'+cx+'" y="368" width="'+cw+'" height="58" rx="12"/>';
+      out += T('muted', mid, 384, '실행 중인 코드');
+      if(cap.old){
+        out += T('muted', mid, 402, cap.old, 'text-decoration:line-through');
+        out += T(tc, mid, 418, '→ '+cap.now, 'font-weight:700');
+      } else {
+        out += T(tc, mid, 406, cap.now, 'font-weight:600');
+      }
+    }
+    return out;
+  }
+  function render(){
+    var s = steps[i];
+    var h = '<defs>'+
+      '<marker id="ms" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--purple-s)"/></marker>'+
+      '<marker id="mc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--pink-s)"/></marker>'+
+      '<marker id="mb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--blue-s)"/></marker>'+
+      '</defs>';
+    ['term','sock'].forEach(function(k){
+      var o = objs[k];
+      h += '<rect class="obj" x="'+o.x+'" y="'+o.y+'" width="'+o.w+'" height="'+o.h+'" rx="6"/>';
+      h += T('t-k', o.x+o.w/2, o.y+o.h/2+5, o.t);
+    });
+    if(s.pipe){
+      h += '<rect class="kbox" x="300" y="170" width="200" height="175" rx="10"/>';
+      h += T('t-k', 400, 187, '파이프 (커널 메모리)');
+      h += '<rect class="obj" x="320" y="205" width="160" height="30" rx="6"/>' + T('t-k', 400, 225, '쓰기 입구');
+      h += '<rect class="obj buf" x="320" y="250" width="160" height="36" rx="6"/>';
+      h += T('t-k', 400, 273, (s.buf? '버퍼: "'+s.buf+'"' : '버퍼: (비어 있음)'), 'font-weight:600');
+      h += '<rect class="obj" x="320" y="300" width="160" height="30" rx="6"/>' + T('t-k', 400, 320, '읽기 입구');
+      h += '<line class="flow" x1="400" y1="235" x2="400" y2="250"/><line class="flow" x1="400" y1="286" x2="400" y2="300"/>';
+    }
+    h += '<rect class="disk" x="820" y="362" width="150" height="64" rx="8"/>';
+    h += T('muted', 895, 380, '디스크 (파일)');
+    h += T('t-b', 895, 398, 'CGI 프로그램', 'font-weight:600');
+    h += T('muted', 895, 415, './www/cgi/hello');
+    if(s.load){
+      var hh = s.load===2;
+      h += '<line class="load'+(hh?' hl':'')+'" x1="820" y1="397" x2="772" y2="397" marker-end="url(#mb)"/>';
+    }
+    h += proc('s', s.server, '서버 프로세스', 'PID 100', s.hl, {now:'서버 코드', kind:'p'});
+    if(s.child){
+      h += proc('c', s.child, '자식 프로세스', s.label, s.hl, s.cap);
+      if(s.act){
+        var ah = 16*s.act.length + 18;
+        h += '<rect class="act" x="620" y="135" width="150" height="'+ah+'" rx="8"/>';
+        s.act.forEach(function(t, k){
+          h += T('t-b', 695, 158+16*k, t);
+        });
+      }
+    }
+    if(s.got){
+      h += '<rect class="gotbox" x="30" y="335" width="100" height="24" rx="6"/>' + T('t-p', 80, 352, '읽은 값: "'+s.got+'"');
+    }
+    svg.innerHTML = h;
+    document.getElementById('stepno').textContent = (i+1)+' / '+steps.length;
+    document.getElementById('caller').textContent = s.caller;
+    document.getElementById('desc').textContent = s.desc;
+    document.getElementById('prev').disabled = i===0;
+    document.getElementById('next').disabled = i===steps.length-1;
+  }
+  document.getElementById('prev').onclick = function(){ if(i>0){i--;render();} };
+  document.getElementById('next').onclick = function(){ if(i<steps.length-1){i++;render();} };
+  render();
+})();
+</script>
+
+</body>
+</html>
