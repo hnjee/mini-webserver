@@ -14,7 +14,8 @@ flowchart LR
     classDef done fill:#EAF3DE,stroke:#3B6D11,color:#173404
     classDef blocked fill:#FCEBEB,stroke:#A32D2D,color:#501313
     class S0,S1,S2,S3 done
-    class S4,S5,S6,S7,S8 todo
+    class S4 doing
+    class S5,S6,S7,S8 todo
 ```
 
 | Step | 내용 | 요구사항 | 일정 | 상태 | 문서 |
@@ -23,7 +24,7 @@ flowchart LR
 | 1 | TCP 에코 서버 | R-01 | 11/21 (토) | ✅ 완료 | [Step 1](./steps/step-1-echo/README.md) · [결정](./steps/step-1-echo/decision.md) |
 | 2 | HTTP 요청 파싱 + 고정 응답 | R-02, R-03, Q-03 | 11/23 (월) | ✅ 완료 | [Step 2](./steps/step-2-http-parse/README.md) · [결정](./steps/step-2-http-parse/decision.md) |
 | 3 | 정적 파일 서빙 | R-04 | 11/23 (월) | ✅ 완료 | [Step 3](./steps/step-3-static/README.md) · [결정](./steps/step-3-static/decision.md) |
-| 4 | POST 본문 + keep-alive | R-05, Q-03 | 11/24 (화) | ⬜ 시작 전 | [Step 4](./steps/step-4-post-keepalive/README.md) · [결정](./steps/step-4-post-keepalive/decision.md) |
+| 4 | POST 본문 + keep-alive | R-05, Q-03 | 11/24 (화) | ✅ 완료 | [Step 4](./steps/step-4-post-keepalive/README.md) · [결정](./steps/step-4-post-keepalive/decision.md) |
 | 5 | 동시성 | R-06, Q-02 | 11/24 (화) | ⬜ 시작 전 | [Step 5](./steps/step-5-concurrency/README.md) · [결정](./steps/step-5-concurrency/decision.md) |
 | 6 | 리버스 프록시 (동적 요청 처리 포함) | R-07, R-08, Q-03 | 11/25 (수) 오전 | ⬜ 시작 전 | [Step 6](./steps/step-6-reverse-proxy/README.md) · [결정](./steps/step-6-reverse-proxy/decision.md) |
 | 7 | 안정성 | R-09, Q-03 | 11/25 (수) 오후 | ⬜ 시작 전 | [Step 7](./steps/step-7-robustness/README.md) · [결정](./steps/step-7-robustness/decision.md) |
@@ -31,7 +32,8 @@ flowchart LR
 
 ## 지금
 
-- 다음 구현 단위: Step 4 POST 본문 + keep-alive. Step 3은 독립 검증을 통과했다(TC-3-01~19, 단위 검사 412건).
+- 완료: Step 4 POST 본문 + keep-alive. 독립 검증을 통과했다(TC-4-01~36, 단위 검사 675건).
+- 다음: Step 5 동시성.
 - 막힌 것: Step 0 기술 범위에는 없음. 프록시 라우팅 인자(`-c`)는 Step 6에서 추가한다.
 
 ## 기준선

@@ -1,4 +1,8 @@
-/* Step 2·3 단위 테스트: http_conn_serve를 socketpair와 임시 루트로 시험한다(TC-2-07, D-17 보조, TC-3-08, TC-3-10). */
+/*
+ * Step 2·3·4 단위 테스트: http_conn_serve를 socketpair와 임시 루트로 시험한다
+ * (TC-2-07, D-17 보조, TC-3-08, TC-3-10, TC-4-10·19·20·22·24~29).
+ * 서버는 연결을 유지하므로(D-51) 요청을 다 쓴 뒤 쓰기 방향을 닫아야 돌아온다. 5초를 기다리는 시험은 맨 끝에 자식 프로세스로 함께 돌린다.
+ */
 #define _XOPEN_SOURCE 700 /* mkdtemp·realpath */
 
 #include "../src/http_conn.h"
@@ -13,6 +17,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -137,7 +142,7 @@ static void make_file(const char *rel, const char *data, size_t len)
     close(fd);
 }
 
-/* 임시 루트: index.html, big.bin(BIG_LEN), huge.bin(HUGE_LEN), sub/, loop -> loop */
+/* 임시 루트: index.html, big.bin(BIG_LEN), huge.bin(HUGE_LEN), echo(파일), sub/, loop -> loop */
 static void build_root(void)
 {
     char p[PATH_MAX];
@@ -151,6 +156,7 @@ static void build_root(void)
     path_in(root, tmp, "www");
     setup_or_die(mkdir(root, 0755) == 0, "mkdir www");
     make_file("index.html", index_body, sizeof(index_body) - 1);
+    make_file("echo", "echo-file\n", 10); /* TC-4-25: /echo가 파일보다 먼저다 */
     for (i = 0; i < BIG_LEN; i++) {
         big_body[i] = (char)(i * 131 + 17);
     }
@@ -175,21 +181,114 @@ static void remove_root(void)
 }
 
 /*
- * 요청 전체를 미리 써 두고(쓰기 방향은 열어 둔다) http_conn_serve를 부른 뒤, server를 닫고 응답을 읽는다.
- * 쓰기 방향을 열어 두므로 서버가 요청 머리 뒤에 더 읽으려 하면 막혀 alarm으로 실패한다.
+ * 요청 전체를 미리 써 두고 쓰기 방향을 닫은 뒤 http_conn_serve를 부르고, server를 닫고 응답을 읽는다.
+ * 유지 응답 뒤 서버는 다음 요청을 읽다가 EOF를 만나 돌아온다(D-53 요청 사이). reply_len에 응답 길이를 쓴다.
  */
-static http_conn_result serve_prewritten(const char *req, size_t len, char *reply, size_t cap)
+static http_conn_result serve_prewritten_len(const char *req, size_t len, char *reply, size_t cap, size_t *reply_len)
 {
     int fds[2];
     http_conn_result r;
+    size_t n;
 
     setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
     write_all(fds[0], req, len);
+    setup_or_die(shutdown(fds[0], SHUT_WR) == 0, "shutdown");
     r = http_conn_serve(fds[1], root);
     close(fds[1]);
-    read_all(fds[0], reply, cap);
+    n = read_all(fds[0], reply, cap);
     close(fds[0]);
+    if (reply_len != NULL) {
+        *reply_len = n;
+    }
     return r;
+}
+
+static http_conn_result serve_prewritten(const char *req, size_t len, char *reply, size_t cap)
+{
+    return serve_prewritten_len(req, len, reply, cap, NULL);
+}
+
+#define NPOS ((size_t)-1)
+
+static size_t find_in(const char *hay, size_t len, const char *needle)
+{
+    size_t n = strlen(needle), i;
+    for (i = 0; i + n <= len; i++) {
+        if (memcmp(hay + i, needle, n) == 0) {
+            return i;
+        }
+    }
+    return NPOS;
+}
+
+/* p[0..len)의 첫 응답 길이(머리 + Content-Length). 100은 머리만. 머리나 본문이 모자라면 0. */
+static size_t response_len(const char *p, size_t len)
+{
+    size_t head = find_in(p, len, "\r\n\r\n"), at;
+    unsigned long cl;
+
+    if (head == NPOS) {
+        return 0;
+    }
+    head += 4;
+    if (len >= 13 && memcmp(p, "HTTP/1.1 100 ", 13) == 0) {
+        return head;
+    }
+    at = find_in(p, head, "\r\nContent-Length: ");
+    if (at == NPOS) {
+        return 0;
+    }
+    cl = strtoul(p + at + 18, NULL, 10);
+    return head + cl <= len ? head + cl : 0;
+}
+
+/* 기대 응답 하나: 상태 줄, 본문, Connection 값(NULL이면 Connection 머리 없음), 머리에 꼭 있어야 할 줄(NULL 가능). */
+typedef struct {
+    const char *line;
+    const char *body;
+    size_t body_len;
+    const char *conn;
+    const char *must;
+} want_resp;
+
+/* reply가 want[0..n)과 순서대로 정확히 같은 응답들이고 뒤에 남는 바이트가 없는가. */
+static void check_replies(const char *name, const char *reply, size_t reply_len, const want_resp *want, size_t n)
+{
+    char label[256], conn[64];
+    size_t i, at = 0;
+
+    for (i = 0; i < n; i++) {
+        const char *p = reply + at;
+        size_t len = response_len(p, reply_len - at), head;
+        int ok;
+
+        snprintf(label, sizeof(label), "%s 응답 %zu: %.*s", name, i + 1, (int)strlen(want[i].line) - 2, want[i].line);
+        if (len == 0) {
+            check(label, 0, "응답이 없거나 잘렸다");
+            return;
+        }
+        head = find_in(p, len, "\r\n\r\n") + 4;
+        ok = len >= strlen(want[i].line) && memcmp(p, want[i].line, strlen(want[i].line)) == 0;
+        ok = ok && len - head == want[i].body_len && memcmp(p + head, want[i].body, want[i].body_len) == 0;
+        if (want[i].conn == NULL) {
+            ok = ok && find_in(p, head, "\r\nConnection:") == NPOS;
+        } else {
+            snprintf(conn, sizeof(conn), "\r\nConnection: %s\r\n", want[i].conn);
+            ok = ok && find_in(p, head, conn) != NPOS;
+        }
+        ok = ok && (want[i].must == NULL || find_in(p, head, want[i].must) != NPOS);
+        check(label, ok, "상태 줄·본문·Connection·머리가 다르다");
+        at += len;
+    }
+    snprintf(label, sizeof(label), "%s 응답 %zu개 뒤 남은 바이트 없음", name, n);
+    check(label, at == reply_len, "남은 바이트가 있다");
+}
+
+static double elapsed_since(const struct timespec *start)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)(now.tv_sec - start->tv_sec) + (double)(now.tv_nsec - start->tv_nsec) / 1e9;
 }
 
 /* TC-2-07: 다른 프로세스가 서버 역할을 하고, 이 프로세스가 요청을 두 번에 나눠 쓴다. */
@@ -209,12 +308,13 @@ static void test_split_request(void)
         close(fds[0]);
         r = http_conn_serve(fds[1], root);
         close(fds[1]);
-        _exit(r == HTTP_CONN_RESPONDED ? 0 : r == HTTP_CONN_PEER_CLOSED ? 1 : 2);
+        _exit(r == HTTP_CONN_DONE ? 0 : r == HTTP_CONN_PEER_CLOSED ? 1 : 2);
     }
     close(fds[1]);
     wrote = try_write_all(fds[0], "GET / HTTP/1.1\r\n", 16) == 0;
     nanosleep(&gap, NULL);
     wrote = wrote && try_write_all(fds[0], "Host: x\r\n\r\n", 11) == 0;
+    setup_or_die(shutdown(fds[0], SHUT_WR) == 0, "shutdown");
     check("TC-2-07 두 조각 모두 쓰기 성공", wrote, "서버가 요청 도중 닫았다");
     reply_len = read_all(fds[0], reply, sizeof(reply));
     close(fds[0]);
@@ -222,8 +322,7 @@ static void test_split_request(void)
     check("TC-2-07 나눠 쓴 요청에 200", starts_with(reply, "HTTP/1.1 200 OK\r\n"), "200 응답이 아니다");
     check("TC-2-07 나눠 쓴 요청 본문 = index.html", body_is(reply, reply_len, index_body, sizeof(index_body) - 1),
           "본문이 다르다");
-    check("TC-2-07 나눠 쓴 요청 RESPONDED", WIFEXITED(status) && WEXITSTATUS(status) == 0,
-          "RESPONDED가 아니다");
+    check("TC-2-07 나눠 쓴 요청 DONE", WIFEXITED(status) && WEXITSTATUS(status) == 0, "DONE이 아니다");
 }
 
 /* TC-2-07: 머리 도중 상대가 쓰기를 닫으면 응답 없이 PEER_CLOSED. */
@@ -256,30 +355,45 @@ static void test_status_mapping(void)
         const char *req;
         const char *line;
         const char *body;
+        const char *conn; /* D-51: 닫는 코드는 close, 1.1 유지 응답은 Connection 머리 없음 */
+        const char *must;
     } cases[] = {
-        {"D-17 OK → 200 index.html", "GET / HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 200 OK\r\n", index_body},
-        {"D-17 POST 본문은 읽지 않고 200 index.html (D-30)",
-         "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc", "HTTP/1.1 200 OK\r\n", index_body},
-        {"TC-3-10 POST /index.html 본문 있음 → GET과 같은 200 (D-30)",
-         "POST /index.html HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nname=hyunji", "HTTP/1.1 200 OK\r\n",
-         index_body},
+        {"D-17 OK → 200 index.html", "GET / HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 200 OK\r\n", index_body, NULL,
+         NULL},
+        {"D-36 POST / 본문 있음 → 405 Allow: GET",
+         "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc", "HTTP/1.1 405 Method Not Allowed\r\n",
+         "405 Method Not Allowed\n", NULL, "\r\nAllow: GET\r\n"},
+        {"D-36 POST /index.html 본문 있음 → 405 Allow: GET",
+         "POST /index.html HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nname=hyunji",
+         "HTTP/1.1 405 Method Not Allowed\r\n", "405 Method Not Allowed\n", NULL, "\r\nAllow: GET\r\n"},
         {"D-26 REDIRECT → 301", "GET /sub HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 301 Moved Permanently\r\n",
-         "301 Moved Permanently\n"},
+         "301 Moved Permanently\n", NULL, NULL},
         {"D-26 BAD_TARGET → 400", "GET index.html HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 400 Bad Request\r\n",
-         "400 Bad Request\n"},
+         "400 Bad Request\n", "close", NULL},
         {"D-26 FORBIDDEN → 403", "GET /../etc/passwd HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 403 Forbidden\r\n",
-         "403 Forbidden\n"},
+         "403 Forbidden\n", NULL, NULL},
         {"D-26 NOT_FOUND → 404", "GET /nope.html HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 404 Not Found\r\n",
-         "404 Not Found\n"},
+         "404 Not Found\n", NULL, NULL},
         {"D-26 ERROR → 500 (ELOOP)", "GET /loop HTTP/1.1\r\nHost: x\r\n\r\n",
-         "HTTP/1.1 500 Internal Server Error\r\n", "500 Internal Server Error\n"},
+         "HTTP/1.1 500 Internal Server Error\r\n", "500 Internal Server Error\n", NULL, NULL},
         {"D-35 HEAD / HTTP/1.1 → 501 본문 그대로", "HEAD / HTTP/1.1\r\nHost: x\r\n\r\n",
-         "HTTP/1.1 501 Not Implemented\r\n", "501 Not Implemented\n"},
-        {"D-17 BAD_REQUEST → 400", "GET / HTTP/1.1\r\n\r\n", "HTTP/1.1 400 Bad Request\r\n", "400 Bad Request\n"},
+         "HTTP/1.1 501 Not Implemented\r\n", "501 Not Implemented\n", "close", NULL},
+        {"D-17 BAD_REQUEST → 400", "GET / HTTP/1.1\r\n\r\n", "HTTP/1.1 400 Bad Request\r\n", "400 Bad Request\n",
+         "close", NULL},
         {"D-17 NOT_IMPLEMENTED → 501", "BREW / HTTP/1.1\r\nHost: x\r\n\r\n", "HTTP/1.1 501 Not Implemented\r\n",
-         "501 Not Implemented\n"},
+         "501 Not Implemented\n", "close", NULL},
         {"D-17 VERSION_NOT_SUPPORTED → 505", "GET / HTTP/2.0\r\nHost: x\r\n\r\n",
-         "HTTP/1.1 505 HTTP Version Not Supported\r\n", "505 HTTP Version Not Supported\n"},
+         "HTTP/1.1 505 HTTP Version Not Supported\r\n", "505 HTTP Version Not Supported\n", "close", NULL},
+        {"TC-4-21 chunked → 501, 닫힘", "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n",
+         "HTTP/1.1 501 Not Implemented\r\n", "501 Not Implemented\n", "close", NULL},
+        {"TC-4-21 chunked, gzip → 400, 닫힘",
+         "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked, gzip\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n",
+         "HTTP/1.1 400 Bad Request\r\n", "400 Bad Request\n", "close", NULL},
+        {"D-49 Content-Length 중복 → 400, 닫힘",
+         "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\nx",
+         "HTTP/1.1 400 Bad Request\r\n", "400 Bad Request\n", "close", NULL},
+        {"D-44 1MB 초과 → 413, 닫힘", "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 1048577\r\n\r\nabc",
+         "HTTP/1.1 413 Content Too Large\r\n", "413 Content Too Large\n", "close", NULL},
     };
     static char reply[4096], full[HTTP_REQUEST_HEAD_MAX];
     size_t i, reply_len;
@@ -287,29 +401,33 @@ static void test_status_mapping(void)
     char label[160];
 
     for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        int fds[2];
-        setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
-        write_all(fds[0], cases[i].req, strlen(cases[i].req));
-        r = http_conn_serve(fds[1], root);
-        close(fds[1]);
-        reply_len = read_all(fds[0], reply, sizeof(reply));
-        close(fds[0]);
-        check(cases[i].name, r == HTTP_CONN_RESPONDED && starts_with(reply, cases[i].line), reply);
-        snprintf(label, sizeof(label), "%s 본문·Content-Length", cases[i].name);
-        check(label, body_is(reply, reply_len, cases[i].body, strlen(cases[i].body)), "본문이 다르다");
+        want_resp w = {cases[i].line, cases[i].body, strlen(cases[i].body), cases[i].conn, cases[i].must};
+        r = serve_prewritten_len(cases[i].req, strlen(cases[i].req), reply, sizeof(reply), &reply_len);
+        snprintf(label, sizeof(label), "%s DONE", cases[i].name);
+        check(label, r == HTTP_CONN_DONE, "DONE이 아니다");
+        check_replies(cases[i].name, reply, reply_len, &w, 1);
     }
     {
         const char req[] = "GET //sub?v=1 HTTP/1.1\r\nHost: x\r\n\r\n";
         r = serve_prewritten(req, sizeof(req) - 1, reply, sizeof(reply));
     }
-    check("D-26 301 Location: /sub/ (C1, D-24)",
-          r == HTTP_CONN_RESPONDED && strstr(reply, "\r\nLocation: /sub/\r\nConnection: close\r\n") != NULL, reply);
+    check("D-26 301 Location: /sub/ (C1, D-24), 1.1 유지라 Connection 없음",
+          r == HTTP_CONN_DONE && strstr(reply, "\r\nLocation: /sub/\r\n\r\n") != NULL, reply);
 
     memset(full, 'a', sizeof(full));
     r = serve_prewritten(full, sizeof(full), reply, sizeof(reply));
-    check("D-17 종료 없이 8192바이트 → 400 (0바이트 read 없음)",
-          r == HTTP_CONN_RESPONDED && starts_with(reply, "HTTP/1.1 400 Bad Request\r\n"),
-          r == HTTP_CONN_PEER_CLOSED ? "PEER_CLOSED로 끝났다" : "400 응답이 아니다");
+    check("D-42 종료 없이 8192바이트 → 431 (0바이트 read 없음)",
+          r == HTTP_CONN_DONE && starts_with(reply, "HTTP/1.1 431 Request Header Fields Too Large\r\n") &&
+              strstr(reply, "\r\nConnection: close\r\n") != NULL,
+          r == HTTP_CONN_PEER_CLOSED ? "PEER_CLOSED로 끝났다" : "431 응답이 아니다");
+
+    memcpy(full, "GET /", 5);
+    memset(full + 5, 'a', HTTP_REQUEST_TARGET_MAX);
+    r = serve_prewritten(full, 4 + HTTP_REQUEST_TARGET_MAX + 1, reply, sizeof(reply));
+    check("D-43 종료 빈 줄 없이 대상 2049바이트 → 414, 닫힘",
+          r == HTTP_CONN_DONE && starts_with(reply, "HTTP/1.1 414 URI Too Long\r\n") &&
+              strstr(reply, "\r\nConnection: close\r\n") != NULL,
+          reply);
 }
 
 /* D-17·D-29: 파일 응답의 머리 쓰기 실패. 파일은 열렸으므로 fd 누수도 본다(TC-3-08). */
@@ -344,6 +462,7 @@ static void test_big_file(void)
     setup_or_die(reply != NULL, "malloc");
     setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
     write_all(fds[0], req, sizeof(req) - 1);
+    setup_or_die(shutdown(fds[0], SHUT_WR) == 0, "shutdown");
     pid = fork();
     setup_or_die(pid >= 0, "fork");
     if (pid == 0) {
@@ -351,13 +470,13 @@ static void test_big_file(void)
         close(fds[0]);
         r = http_conn_serve(fds[1], root);
         close(fds[1]);
-        _exit(r == HTTP_CONN_RESPONDED ? 0 : 1);
+        _exit(r == HTTP_CONN_DONE ? 0 : 1);
     }
     close(fds[1]);
     reply_len = read_all(fds[0], reply, cap);
     close(fds[0]);
     setup_or_die(waitpid(pid, &status, 0) == pid, "waitpid");
-    check("TC-3-10 3×64KB+123 파일 RESPONDED", WIFEXITED(status) && WEXITSTATUS(status) == 0, "자식 실패");
+    check("TC-3-10 3×64KB+123 파일 DONE", WIFEXITED(status) && WEXITSTATUS(status) == 0, "자식 실패");
     check("TC-3-10 3×64KB+123 파일 200", starts_with(reply, "HTTP/1.1 200 OK\r\n"), "200이 아니다");
     check("TC-3-10 3×64KB+123 파일 바이트·Content-Length 일치", body_is(reply, reply_len, big_body, BIG_LEN),
           "본문이 다르다");
@@ -401,11 +520,619 @@ static void test_close_mid_body(void)
           "열린 fd가 남았다");
 }
 
+#define S(lit) lit, sizeof(lit) - 1 /* 문자열 상수와 그 길이 */
+#define INDEX_200 {"HTTP/1.1 200 OK\r\n", index_body, sizeof(index_body) - 1, NULL, NULL}
+#define GET_ROOT "GET / HTTP/1.1\r\nHost: x\r\n\r\n"
+
+/* 미리 쓴 요청 하나의 결과가 DONE이고 응답들이 want와 같은가. */
+static void expect_conn(const char *name, const char *req, size_t req_len, const want_resp *want, size_t n)
+{
+    static char reply[65536];
+    char label[160];
+    size_t reply_len;
+    http_conn_result r = serve_prewritten_len(req, req_len, reply, sizeof(reply), &reply_len);
+
+    snprintf(label, sizeof(label), "%s DONE", name);
+    check(label, r == HTTP_CONN_DONE, "DONE이 아니다");
+    check_replies(name, reply, reply_len, want, n);
+}
+
+/* TC-4-10: /echo 요청과 다음 요청이 한 번에 온다. */
+static void test_two_requests_at_once(void)
+{
+    const want_resp want[] = {
+        {"HTTP/1.1 200 OK\r\n", S("hello"), NULL, "\r\nContent-Type: application/octet-stream\r\n"},
+        INDEX_200,
+    };
+    expect_conn("TC-4-10 POST /echo + GET / 한 번에",
+                S("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello" GET_ROOT), want, 2);
+}
+
+/* TC-4-19: Expect: 100-continue. 1.1은 서버가 100을 보낸 뒤에야 본문을 보낸다(본문 읽기 직전에 보내는지 확인). */
+static void test_expect_continue(void)
+{
+    static const char want100[] = "HTTP/1.1 100 Continue\r\n\r\n";
+    static char reply[4096];
+    char got[sizeof(want100) - 1];
+    size_t have = 0, reply_len;
+    int fds[2], status;
+    pid_t pid;
+
+    setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
+    pid = fork();
+    setup_or_die(pid >= 0, "fork");
+    if (pid == 0) {
+        http_conn_result r;
+        close(fds[0]);
+        r = http_conn_serve(fds[1], root);
+        close(fds[1]);
+        _exit(r == HTTP_CONN_DONE ? 0 : 1);
+    }
+    close(fds[1]);
+    write_all(fds[0], S("POST /echo HTTP/1.1\r\nHost: x\r\nExpect: 100-Continue\r\nContent-Length: 5\r\n\r\n"));
+    while (have < sizeof(got)) {
+        ssize_t n = read(fds[0], got + have, sizeof(got) - have);
+        if (n <= 0) {
+            break;
+        }
+        have += (size_t)n;
+    }
+    check("TC-4-19 1.1 본문 있음: 본문을 보내기 전에 100 Continue", have == sizeof(got) &&
+                                                                     memcmp(got, want100, have) == 0,
+          "100을 받지 못했다");
+    /* 서버가 100 없이 먼저 닫았을 수 있으므로 쓰기 실패는 준비 실패로 보지 않는다(응답 비교에서 잡힌다). */
+    (void)try_write_all(fds[0], S("hello"));
+    (void)shutdown(fds[0], SHUT_WR);
+    reply_len = read_all(fds[0], reply, sizeof(reply));
+    close(fds[0]);
+    setup_or_die(waitpid(pid, &status, 0) == pid, "waitpid");
+    {
+        const want_resp want[] = {{"HTTP/1.1 200 OK\r\n", S("hello"), NULL, NULL}};
+        check_replies("TC-4-19 1.1 100 뒤", reply, reply_len, want, 1);
+    }
+    check("TC-4-19 1.1 100 뒤 DONE", WIFEXITED(status) && WEXITSTATUS(status) == 0, "DONE이 아니다");
+
+    {
+        const want_resp want[] = {{"HTTP/1.1 200 OK\r\n", S("hello"), "close", NULL}};
+        expect_conn("TC-4-19 1.0 본문 있음: 100 없음",
+                    S("POST /echo HTTP/1.0\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello"), want, 1);
+    }
+    {
+        const want_resp want[] = {{"HTTP/1.1 200 OK\r\n", S(""), NULL, NULL}};
+        expect_conn("TC-4-19 Content-Length: 0: 100 없음",
+                    S("POST /echo HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 0\r\n\r\n"), want, 1);
+    }
+    {
+        const want_resp want[] = {{"HTTP/1.1 413 Content Too Large\r\n", S("413 Content Too Large\n"), "close", NULL}};
+        expect_conn("TC-4-19 1MB 초과: 100 없이 413",
+                    S("POST /echo HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 1048577\r\n\r\n"), want,
+                    1);
+    }
+}
+
+/* TC-4-08 보조: Connection·버전별 유지(D-51). 닫은 뒤의 요청에는 응답하지 않는다. */
+static void test_keep_alive_rules(void)
+{
+    {
+        const want_resp want[] = {{"HTTP/1.1 200 OK\r\n", index_body, sizeof(index_body) - 1, "close", NULL}};
+        expect_conn("D-51 1.1 Connection: close → 응답 하나 뒤 닫힘",
+                    S("GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n" GET_ROOT), want, 1);
+    }
+    {
+        const want_resp want[] = {
+            {"HTTP/1.1 200 OK\r\n", index_body, sizeof(index_body) - 1, "keep-alive", NULL},
+            {"HTTP/1.1 200 OK\r\n", index_body, sizeof(index_body) - 1, "close", NULL},
+        };
+        expect_conn("D-51 1.0 keep-alive 뒤 1.0 → 유지 후 닫힘",
+                    S("GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\nGET / HTTP/1.0\r\n\r\n" GET_ROOT), want, 2);
+    }
+}
+
+/* TC-4-22: Content-Length 밖에 덧붙은 빈 줄은 다음 요청의 앞 빈 줄이라 400(D-48). */
+static void test_trailing_crlf(void)
+{
+    const want_resp want[] = {
+        {"HTTP/1.1 200 OK\r\n", S("hello"), NULL, NULL},
+        {"HTTP/1.1 400 Bad Request\r\n", S("400 Bad Request\n"), "close", NULL},
+    };
+    expect_conn("TC-4-22 본문 뒤 \\r\\n + GET /",
+                S("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello\r\n" GET_ROOT), want, 2);
+}
+
+/* TC-4-24: 머리 + 8KB를 넘는 /echo 본문 + GET /을 한 번에 쓴다(D-47 본문 일부만 버퍼에 있는 경우). */
+static void test_big_echo_then_next(void)
+{
+    const size_t body_len = 3 * HTTP_REQUEST_HEAD_MAX + 100;
+    const size_t cap = 2 * body_len + 4096;
+    char *req = malloc(cap), *reply = malloc(cap), head[128];
+    size_t i, len, reply_len;
+    int fds[2], status;
+    pid_t pid;
+
+    setup_or_die(req != NULL && reply != NULL, "malloc");
+    len = (size_t)snprintf(head, sizeof(head), "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: %zu\r\n\r\n", body_len);
+    memcpy(req, head, len);
+    for (i = 0; i < body_len; i++) {
+        req[len + i] = (char)(i * 131 + 17);
+    }
+    memcpy(req + len + body_len, GET_ROOT, strlen(GET_ROOT));
+    setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
+    pid = fork();
+    setup_or_die(pid >= 0, "fork");
+    if (pid == 0) {
+        http_conn_result r;
+        close(fds[0]);
+        r = http_conn_serve(fds[1], root);
+        close(fds[1]);
+        _exit(r == HTTP_CONN_DONE ? 0 : 1);
+    }
+    close(fds[1]);
+    write_all(fds[0], req, len + body_len + strlen(GET_ROOT));
+    setup_or_die(shutdown(fds[0], SHUT_WR) == 0, "shutdown");
+    reply_len = read_all(fds[0], reply, cap);
+    close(fds[0]);
+    setup_or_die(waitpid(pid, &status, 0) == pid, "waitpid");
+    check("TC-4-24 큰 /echo + GET / DONE", WIFEXITED(status) && WEXITSTATUS(status) == 0, "DONE이 아니다");
+    {
+        const want_resp want[] = {{"HTTP/1.1 200 OK\r\n", req + len, body_len, NULL, NULL}, INDEX_200};
+        check_replies("TC-4-24 큰 /echo + GET /", reply, reply_len, want, 2);
+    }
+    free(req);
+    free(reply);
+}
+
+/* TC-4-25: /echo 판정 경계(D-50). TC-4-05 보조: GET /echo → 405 Allow: POST. */
+static void test_echo_boundaries(void)
+{
+    {
+        const want_resp want[] = {{"HTTP/1.1 200 OK\r\n", S("abc"), NULL, NULL}};
+        expect_conn("TC-4-25 POST /echo?x=1 → 200",
+                    S("POST /echo?x=1 HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc"), want, 1);
+        expect_conn("TC-4-25 루트에 echo 파일이 있어도 POST /echo → 되돌림",
+                    S("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc"), want, 1);
+    }
+    {
+        const want_resp want[] = {
+            {"HTTP/1.1 405 Method Not Allowed\r\n", S("405 Method Not Allowed\n"), NULL, "\r\nAllow: GET\r\n"}, INDEX_200};
+        expect_conn("TC-4-25 POST /echo/ → 405 Allow: GET, 유지",
+                    S("POST /echo/ HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc" GET_ROOT), want, 2);
+        expect_conn("TC-4-25 없는 파일에 POST → 405, 유지",
+                    S("POST /nope.html HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc" GET_ROOT), want, 2);
+    }
+    {
+        const want_resp want[] = {
+            {"HTTP/1.1 405 Method Not Allowed\r\n", S("405 Method Not Allowed\n"), NULL, "\r\nAllow: POST\r\n"},
+            INDEX_200};
+        expect_conn("TC-4-05 GET /echo → 405 Allow: POST, 유지", S("GET /echo HTTP/1.1\r\nHost: x\r\n\r\n" GET_ROOT),
+                    want, 2);
+        expect_conn("TC-4-25 GET /echo?x 본문 있음 → 405, 본문 버리고 유지",
+                    S("GET /echo?x HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nzz" GET_ROOT), want, 2);
+    }
+}
+
+/* TC-4-26: 유지·닫기 경계(D-51). */
+static void test_keep_or_close_after_error(void)
+{
+    {
+        const want_resp want[] = {
+            {"HTTP/1.1 500 Internal Server Error\r\n", S("500 Internal Server Error\n"), NULL, NULL}, INDEX_200};
+        expect_conn("TC-4-26 500 뒤 유지", S("GET /loop HTTP/1.1\r\nHost: x\r\n\r\n" GET_ROOT), want, 2);
+    }
+    {
+        const want_resp want[] = {
+            {"HTTP/1.1 301 Moved Permanently\r\n", S("301 Moved Permanently\n"), NULL, "\r\nLocation: /sub/\r\n"},
+            INDEX_200};
+        expect_conn("TC-4-26 301 뒤 유지", S("GET /sub HTTP/1.1\r\nHost: x\r\n\r\n" GET_ROOT), want, 2);
+    }
+    {
+        const want_resp want[] = {{"HTTP/1.1 403 Forbidden\r\n", S("403 Forbidden\n"), NULL, NULL}, INDEX_200};
+        expect_conn("TC-4-26 403 뒤 유지", S("GET /../x HTTP/1.1\r\nHost: x\r\n\r\n" GET_ROOT), want, 2);
+    }
+    {
+        const want_resp want[] = {{"HTTP/1.1 404 Not Found\r\n", S("404 Not Found\n"), NULL, NULL}, INDEX_200};
+        expect_conn("TC-4-09 보조: 404 뒤 유지", S("GET /nope HTTP/1.1\r\nHost: x\r\n\r\n" GET_ROOT), want, 2);
+    }
+    {
+        const want_resp want[] = {{"HTTP/1.1 400 Bad Request\r\n", S("400 Bad Request\n"), "close", NULL}};
+        expect_conn("TC-4-26 정적 판정 400 뒤 닫힘", S("GET index.html HTTP/1.1\r\nHost: x\r\n\r\n" GET_ROOT), want, 1);
+    }
+}
+
+/* TC-4-27: 본문 있는 GET도 본문을 읽고 버린 뒤 다음 요청을 처리한다(D-49). */
+static void test_get_with_body(void)
+{
+    const want_resp want[] = {INDEX_200, INDEX_200};
+    expect_conn("TC-4-27 본문 있는 GET 뒤 GET", S("GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc" GET_ROOT),
+                want, 2);
+}
+
+/* TC-4-28: 버릴 본문 도중 상대가 닫으면 응답 없이 PEER_CLOSED(D-50). */
+static void test_close_mid_discard(void)
+{
+    static char reply[4096];
+    size_t reply_len;
+    http_conn_result r =
+        serve_prewritten_len(S("POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc"), reply, sizeof(reply), &reply_len);
+    check("TC-4-28 버릴 본문 도중 닫힘 PEER_CLOSED", r == HTTP_CONN_PEER_CLOSED, "PEER_CLOSED가 아니다");
+    check("TC-4-28 응답 없음", reply_len == 0, reply);
+}
+
+/* ---- 서버를 자식으로 띄우고 결과·errno를 파이프로 받는 시험(TC-4-32·34·35) ---- */
+
+typedef struct {
+    http_conn_result result;
+    int err;
+} served;
+
+/* fds[0]은 클라이언트 쪽이다. 테스트가 서버를 기다리다 멈추지 않게 읽기 시간 제한 3초를 건다. */
+static pid_t fork_server(int fds[2], int *result_fd)
+{
+    struct timeval tv = {3, 0};
+    int p[2];
+    pid_t pid;
+
+    setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
+    setup_or_die(pipe(p) == 0, "pipe");
+    setup_or_die(setsockopt(fds[0], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0, "SO_RCVTIMEO");
+    fflush(stdout);
+    pid = fork();
+    setup_or_die(pid >= 0, "fork");
+    if (pid == 0) {
+        served s;
+        close(fds[0]);
+        close(p[0]);
+        errno = 0;
+        s.result = http_conn_serve(fds[1], root);
+        s.err = errno;
+        close(fds[1]);
+        _exit(write(p[1], &s, sizeof(s)) == (ssize_t)sizeof(s) ? 0 : 3);
+    }
+    close(fds[1]);
+    close(p[1]);
+    *result_fd = p[0];
+    return pid;
+}
+
+static served join_server(pid_t pid, int result_fd)
+{
+    served s = {HTTP_CONN_ERROR, -1}; /* 자식이 결과를 못 보내면 err -1 */
+    int status;
+
+    if (read(result_fd, &s, sizeof(s)) != (ssize_t)sizeof(s)) {
+        s.result = HTTP_CONN_ERROR;
+        s.err = -1;
+    }
+    close(result_fd);
+    setup_or_die(waitpid(pid, &status, 0) == pid, "waitpid");
+    return s;
+}
+
+/* 완성된 응답이 count개가 될 때까지 읽는다. EOF·시간 제한이면 그때까지. 전체 길이를 돌려준다. */
+static size_t read_responses(int fd, char *buf, size_t cap, size_t have, size_t count)
+{
+    for (;;) {
+        size_t at = 0, k = 0, l;
+        ssize_t n;
+        while (k < count && (l = response_len(buf + at, have - at)) > 0) {
+            at += l;
+            k++;
+        }
+        if (k == count || have == cap) {
+            return have;
+        }
+        n = read(fd, buf + have, cap - have);
+        if (n <= 0) {
+            return have;
+        }
+        have += (size_t)n;
+    }
+}
+
+/* needle이 보일 때까지 읽는다. EOF·시간 제한이면 그때까지. */
+static size_t read_until_found(int fd, char *buf, size_t cap, size_t have, const char *needle)
+{
+    while (find_in(buf, have, needle) == NPOS && have < cap) {
+        ssize_t n = read(fd, buf + have, cap - have);
+        if (n <= 0) {
+            break;
+        }
+        have += (size_t)n;
+    }
+    return have;
+}
+
+/*
+ * TC-4-34 (N2, P1): 첫 응답 뒤 남은 바이트가 다음 요청 머리 일부다. 첫 응답을 받은 뒤에야 나머지를 쓰므로
+ * 서버는 남은 바이트를 맨 앞으로 옮기고 다시 read해야 둘째 요청을 완성한다(D-47).
+ */
+static void test_leftover_partial_head(void)
+{
+    static char reply[16384];
+    const want_resp want[] = {INDEX_200, INDEX_200};
+    size_t have;
+    int fds[2], rfd;
+    pid_t pid = fork_server(fds, &rfd);
+    served s;
+
+    write_all(fds[0], S(GET_ROOT "GET / HT"));
+    have = read_responses(fds[0], reply, sizeof(reply), 0, 1);
+    check("TC-4-34 남은 바이트(머리 일부)만 있을 때 첫 응답이 먼저 옴", response_len(reply, have) == have && have > 0,
+          "첫 응답이 완성되지 않았거나 더 왔다");
+    write_all(fds[0], S("TP/1.1\r\nHost: x\r\n\r\n"));
+    setup_or_die(shutdown(fds[0], SHUT_WR) == 0, "shutdown");
+    have = read_responses(fds[0], reply, sizeof(reply), have, 3);
+    close(fds[0]);
+    s = join_server(pid, rfd);
+    check("TC-4-34 이동 뒤 다시 읽어 둘째 요청 완성, DONE", s.result == HTTP_CONN_DONE, "DONE이 아니다");
+    check_replies("TC-4-34 남은 머리 일부 + 나중 바이트", reply, have, want, 2);
+}
+
+/*
+ * TC-4-35 (N2, P2): 남은 바이트가 다음 /echo 머리 + 본문 일부다. 서버가 그 일부(abc)를 돌려준 것을 본 뒤에
+ * 나머지 본문과 다음 요청을 쓴다. 본문 나머지는 소켓에서 남은 길이만큼만 읽어야 셋째 요청이 남는다(D-47).
+ */
+static void test_leftover_head_and_partial_body(void)
+{
+    static char reply[16384];
+    const want_resp want[] = {INDEX_200, {"HTTP/1.1 200 OK\r\n", S("abcdefghij"), NULL, NULL}, INDEX_200};
+    size_t have;
+    int fds[2], rfd;
+    pid_t pid = fork_server(fds, &rfd);
+    served s;
+
+    write_all(fds[0], S(GET_ROOT "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc"));
+    have = read_responses(fds[0], reply, sizeof(reply), 0, 1);
+    have = read_until_found(fds[0], reply, sizeof(reply), have, "\r\n\r\nabc");
+    check("TC-4-35 버퍼에 있던 본문 일부(abc)가 나머지보다 먼저 나감", find_in(reply, have, "\r\n\r\nabc") != NPOS &&
+                                                                       have >= 3 && memcmp(reply + have - 3, "abc", 3) == 0,
+          "abc가 먼저 오지 않았다");
+    write_all(fds[0], S("defghij" GET_ROOT));
+    setup_or_die(shutdown(fds[0], SHUT_WR) == 0, "shutdown");
+    have = read_responses(fds[0], reply, sizeof(reply), have, 4);
+    close(fds[0]);
+    s = join_server(pid, rfd);
+    check("TC-4-35 본문 나머지 읽은 뒤 다음 요청, DONE", s.result == HTTP_CONN_DONE, "DONE이 아니다");
+    check_replies("TC-4-35 머리 + 본문 일부 + 나중 나머지", reply, have, want, 3);
+}
+
+/* TC-4-36 (N2, P9): 머리가 정확히 8192바이트면 버퍼가 꽉 차고 본문은 모두 소켓에 있다. 8193이면 431. */
+static void test_head_exactly_8k(void)
+{
+    static char req[HTTP_REQUEST_HEAD_MAX + 64];
+    const char pre[] = "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nX-Pad: ";
+    size_t pad = HTTP_REQUEST_HEAD_MAX - (sizeof(pre) - 1) - 4, len;
+
+    memcpy(req, pre, sizeof(pre) - 1);
+    memset(req + sizeof(pre) - 1, 'p', pad);
+    memcpy(req + sizeof(pre) - 1 + pad, "\r\n\r\n", 4);
+    check("TC-4-36 준비: 머리 8192바이트", find_in(req, HTTP_REQUEST_HEAD_MAX, "\r\n\r\n") + 4 == HTTP_REQUEST_HEAD_MAX,
+          "길이가 다르다");
+    len = HTTP_REQUEST_HEAD_MAX;
+    memcpy(req + len, "hello" GET_ROOT, 5 + strlen(GET_ROOT));
+    {
+        const want_resp want[] = {{"HTTP/1.1 200 OK\r\n", S("hello"), NULL, NULL}, INDEX_200};
+        expect_conn("TC-4-36 머리 8192 + 본문 5 + 다음 요청", req, len + 5 + strlen(GET_ROOT), want, 2);
+    }
+    req[HTTP_REQUEST_HEAD_MAX - 4] = 'p';
+    memcpy(req + HTTP_REQUEST_HEAD_MAX - 3, "\r\n\r\nhello", 9);
+    {
+        const want_resp want[] = {{"HTTP/1.1 431 Request Header Fields Too Large\r\n",
+                                   S("431 Request Header Fields Too Large\n"), "close", NULL}};
+        expect_conn("TC-4-36 머리 8193 → 431, 닫힘", req, HTTP_REQUEST_HEAD_MAX + 6, want, 1);
+    }
+}
+
+/* TC-4-31 (N1): /echo 머리를 보낸 뒤 본문 도중 상대가 닫으면 PEER_CLOSED, 머리와 받은 본문만 나간다. */
+static void test_echo_peer_closed_mid_body(void)
+{
+    static char reply[4096];
+    size_t reply_len;
+    http_conn_result r = serve_prewritten_len(S("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc"), reply,
+                                              sizeof(reply), &reply_len);
+    check("TC-4-31 /echo 본문 도중 닫힘 PEER_CLOSED", r == HTTP_CONN_PEER_CLOSED, "PEER_CLOSED가 아니다");
+    check("TC-4-31 머리(Content-Length: 10) + abc만 나감",
+          starts_with(reply, "HTTP/1.1 200 OK\r\n") && find_in(reply, reply_len, "\r\nContent-Length: 10\r\n") != NPOS &&
+              find_in(reply, reply_len, "\r\n\r\nabc") + 7 == reply_len,
+          reply);
+}
+
+/*
+ * TC-4-32 (N1, P5·P6): ECONNRESET 분류. 응답이 도착한 것을 MSG_PEEK로 확인한 뒤 읽지 않은 채 닫으면
+ * AF_UNIX에서 서버의 다음 read가 ECONNRESET이 된다. 요청 사이면 DONE, 요청 도중(다음 머리 일부가 버퍼에 있음)이면 ERROR.
+ */
+static void econnreset_case(const char *name, const char *req, size_t len, http_conn_result want)
+{
+    char peek, label[160];
+    int fds[2], rfd;
+    pid_t pid = fork_server(fds, &rfd);
+    served s;
+
+    write_all(fds[0], req, len);
+    setup_or_die(recv(fds[0], &peek, 1, MSG_PEEK) == 1, "응답 도착 확인");
+    close(fds[0]); /* 읽지 않은 응답을 둔 채 닫는다 */
+    s = join_server(pid, rfd);
+    snprintf(label, sizeof(label), "%s, errno ECONNRESET", name);
+    check(label, s.result == want && s.err == ECONNRESET, s.err > 0 ? strerror(s.err) : "결과가 다르다");
+}
+
+static void test_econnreset(void)
+{
+    econnreset_case("TC-4-32 요청 사이 ECONNRESET → DONE", S(GET_ROOT), HTTP_CONN_DONE);
+    econnreset_case("TC-4-32 요청 도중 ECONNRESET → ERROR", S(GET_ROOT "GET /"), HTTP_CONN_ERROR);
+}
+
+/*
+ * TC-4-33 (N1, P7): 100 Continue 쓰기 실패 → ERROR(EPIPE). /echo가 아닌 주소를 써서, 100 실패를 무시하면
+ * 본문 버리기에서 EOF(PEER_CLOSED)가 되므로 100 쓰기 실패 경로와 구별된다.
+ */
+static void test_continue_write_failure(void)
+{
+    int fds[2], err;
+    http_conn_result r;
+
+    setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
+    write_all(fds[0], S("POST /x HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n"));
+    close(fds[0]);
+    errno = 0;
+    r = http_conn_serve(fds[1], root);
+    err = errno;
+    close(fds[1]);
+    check("TC-4-33 100 쓰기 실패 ERROR, errno EPIPE", r == HTTP_CONN_ERROR && err == EPIPE, strerror(err));
+}
+
+/* ---- 5초를 기다리는 시험: 자식 프로세스에서 함께 돌린다 ---- */
+
+/* 요청을 쓰고 쓰기 방향은 열어 둔 채 서버를 부른다. 결과·errno·걸린 시간·응답 길이를 돌려준다. */
+static http_conn_result serve_open(const char *req, size_t len, int *err, double *secs, size_t *reply_len)
+{
+    static char reply[65536];
+    struct timespec start;
+    int fds[2];
+    http_conn_result r;
+
+    setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
+    write_all(fds[0], req, len);
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    errno = 0;
+    r = http_conn_serve(fds[1], root);
+    *err = errno;
+    *secs = elapsed_since(&start);
+    close(fds[1]);
+    *reply_len = read_all(fds[0], reply, sizeof(reply));
+    close(fds[0]);
+    return r;
+}
+
+/* TC-4-20: 머리 도중 타임아웃 → 응답 없이 TIMED_OUT(D-53). */
+static void slow_timeout_mid_head(void)
+{
+    int err;
+    double secs;
+    size_t reply_len;
+    http_conn_result r = serve_open(S("GET / HTTP/1.1\r\nHo"), &err, &secs, &reply_len);
+    check("TC-4-20 머리 도중 타임아웃 TIMED_OUT, 응답 0바이트, 약 5초",
+          r == HTTP_CONN_TIMED_OUT && reply_len == 0 && secs >= 4.5 && secs < 6.5, "결과·응답·시간이 다르다");
+}
+
+/* TC-4-20: 버릴 본문 도중 타임아웃 → 응답 없이 TIMED_OUT. */
+static void slow_timeout_mid_discard(void)
+{
+    int err;
+    double secs;
+    size_t reply_len;
+    http_conn_result r = serve_open(S("POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc"), &err, &secs, &reply_len);
+    check("TC-4-20 버릴 본문 도중 타임아웃 TIMED_OUT, 응답 0바이트, 약 5초",
+          r == HTTP_CONN_TIMED_OUT && reply_len == 0 && secs >= 4.5 && secs < 6.5, "결과·응답·시간이 다르다");
+}
+
+/* TC-4-30 (N1, P3): /echo 머리를 보낸 뒤 본문 도중 타임아웃 → TIMED_OUT, 머리와 받은 본문(abc)만 나간다(D-53 3행). */
+static void slow_echo_timeout_mid_body(void)
+{
+    static char reply[4096];
+    struct timespec start;
+    int fds[2];
+    double secs;
+    size_t reply_len;
+    http_conn_result r;
+
+    setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
+    write_all(fds[0], S("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc"));
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    r = http_conn_serve(fds[1], root); /* 쓰기 방향은 열어 둔다 */
+    secs = elapsed_since(&start);
+    close(fds[1]);
+    reply_len = read_all(fds[0], reply, sizeof(reply));
+    close(fds[0]);
+    check("TC-4-30 /echo 본문 도중 타임아웃 TIMED_OUT, 약 5초", r == HTTP_CONN_TIMED_OUT && secs >= 4.5 && secs < 6.5,
+          "결과·시간이 다르다");
+    check("TC-4-30 머리(Content-Length: 10) + abc만 나감",
+          starts_with(reply, "HTTP/1.1 200 OK\r\n") && find_in(reply, reply_len, "\r\nContent-Length: 10\r\n") != NPOS &&
+              find_in(reply, reply_len, "\r\n\r\nabc") + 7 == reply_len,
+          reply);
+}
+
+/* D-53 1행: 유지 응답 뒤 요청 사이 타임아웃은 DONE. */
+static void slow_idle_after_response(void)
+{
+    int err;
+    double secs;
+    size_t reply_len;
+    http_conn_result r = serve_open(S(GET_ROOT), &err, &secs, &reply_len);
+    check("D-53 요청 사이 유휴 5초 → DONE, 응답 하나", r == HTTP_CONN_DONE && reply_len > 0 && secs >= 4.5 && secs < 6.5,
+          "결과·시간이 다르다");
+}
+
+/* TC-4-29: 응답을 받아 가지 않는 클라이언트 → 쓰기 5초 막힘 → ERROR(EAGAIN), 파일 fd 누수 없음. */
+static void slow_write_blocked(void)
+{
+    const char req[] = "GET /huge.bin HTTP/1.1\r\nHost: x\r\n\r\n";
+    struct timespec start;
+    int fds[2], err, before;
+    double secs;
+    char detail[64];
+    http_conn_result r;
+
+    setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
+    write_all(fds[0], req, sizeof(req) - 1);
+    before = lowest_free_fd();
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    errno = 0;
+    r = http_conn_serve(fds[1], root); /* fds[0]은 열어 둔 채 읽지 않는다 */
+    err = errno;
+    secs = elapsed_since(&start);
+    check("TC-4-29 쓰기 막힘 ERROR, errno EAGAIN·EWOULDBLOCK",
+          r == HTTP_CONN_ERROR && (err == EAGAIN || err == EWOULDBLOCK), strerror(err));
+    /* SO_SNDTIMEO는 write 한 번 단위다(D-53). Linux는 막힌 write가 5초 뒤 쓴 만큼을 돌려주고 다음 write가 5초 뒤 EAGAIN이라 약 10초다. */
+    snprintf(detail, sizeof(detail), "%.2f초", secs);
+    check("TC-4-29 4.5초 이상 걸리고 alarm(15) 전에 돌아옴", secs >= 4.5 && secs < 12.0, detail);
+    check("TC-4-29 파일 fd 누수 없음", lowest_free_fd() == before, "열린 fd가 남았다");
+    close(fds[0]);
+    close(fds[1]);
+}
+
+/* fn을 자식 프로세스에서 돌린다. 자식은 자기 alarm을 걸고 실패가 있으면 1로 끝난다. */
+static pid_t start_slow(void (*fn)(void))
+{
+    pid_t pid;
+    fflush(stdout);
+    pid = fork();
+    setup_or_die(pid >= 0, "fork");
+    if (pid == 0) {
+        alarm(15);
+        failures = 0;
+        fn();
+        fflush(stdout);
+        _exit(failures > 0 ? 1 : 0);
+    }
+    return pid;
+}
+
+static void run_slow_tests(void)
+{
+    void (*fns[])(void) = {slow_timeout_mid_head, slow_timeout_mid_discard, slow_idle_after_response,
+                           slow_write_blocked, slow_echo_timeout_mid_body};
+    pid_t pids[sizeof(fns) / sizeof(fns[0])];
+    size_t i;
+
+    alarm(20); /* 자식들이 함께 기다린다(가장 긴 것은 TC-4-29의 약 10초) */
+    for (i = 0; i < sizeof(fns) / sizeof(fns[0]); i++) {
+        pids[i] = start_slow(fns[i]);
+    }
+    for (i = 0; i < sizeof(fns) / sizeof(fns[0]); i++) {
+        int status;
+        setup_or_die(waitpid(pids[i], &status, 0) == pids[i], "waitpid");
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            printf("  FAIL 느린 시험 %zu번 (자식 종료 상태 %d)\n", i + 1, status);
+            failures++;
+        }
+    }
+}
+
 int main(void)
 {
     alarm(10); /* 서버가 멈추면 끝없이 기다리지 않게 한다 */
     signal(SIGPIPE, SIG_IGN); /* D-05: 서버와 같은 조건 */
-    printf("test_http_conn (TC-2-07, TC-3-08, TC-3-10)\n");
+    printf("test_http_conn (TC-2-07, TC-3-08, TC-3-10, TC-4-10·19·20·22·24~36)\n");
     build_root();
     test_split_request();
     test_close_mid_head();
@@ -413,6 +1140,22 @@ int main(void)
     test_write_failure();
     test_big_file();
     test_close_mid_body();
+    test_two_requests_at_once();
+    test_expect_continue();
+    test_keep_alive_rules();
+    test_trailing_crlf();
+    test_big_echo_then_next();
+    test_echo_boundaries();
+    test_keep_or_close_after_error();
+    test_get_with_body();
+    test_close_mid_discard();
+    test_echo_peer_closed_mid_body();
+    test_econnreset();
+    test_continue_write_failure();
+    test_leftover_partial_head();
+    test_leftover_head_and_partial_body();
+    test_head_exactly_8k();
+    run_slow_tests();
     remove_root();
 
     if (failures > 0) {

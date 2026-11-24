@@ -1,6 +1,6 @@
 /*
- * Step 3: 정적 파일 서빙.
- * 인자를 확인하고 루트를 정규화하고 듣는 소켓을 연 뒤, 연결을 하나씩 받아 요청 하나에 응답 하나를 보내고 닫는다.
+ * Step 4: POST 본문 + keep-alive.
+ * 인자를 확인하고 루트를 정규화하고 듣는 소켓을 연 뒤, 연결을 하나씩 받아 http_conn에 맡기고 닫는다(D-46).
  * 서버는 Ctrl+C(기본 동작)로만 끝난다. 정상 종료 처리는 Step 7이다.
  */
 #define _DEFAULT_SOURCE /* accept(2)의 ENONET 등 Linux 오류 코드, realpath */

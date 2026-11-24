@@ -14,7 +14,7 @@
 | 실행 인자 파싱 | 별도 `getopt` 모듈 (`-p`, `-r`; `-c`는 Step 6) | [Step 0](./steps/step-0-setup/decision.md) |
 | 시험 파일 | 컨테이너 내부 전용 폴더 재사용 (Step 0 검증 통과) | [Step 0](./steps/step-0-setup/decision.md) |
 | 에코 서버 구성 | `listener`·`echo` 모듈 분리, `accept` 반복은 `main.c`, 순차 처리, `SIGPIPE` 무시 | [Step 1](./steps/step-1-echo/decision.md) |
-| 연결별 버퍼 관리 | 8KB 고정 버퍼, 초과 시 400 | [Step 2](./steps/step-2-http-parse/decision.md) (D-09, D-10) |
+| 연결별 버퍼 관리 | 8KB 고정 버퍼, 초과 시 431 | [Step 2](./steps/step-2-http-parse/decision.md) (D-09, D-10) · [Step 4](./steps/step-4-post-keepalive/decision.md) (D-42) |
 | HTTP 버전·`Host` 규칙 | 1.0·1.1 허용, `Host`는 1.1에서만 필수 | [Step 2](./steps/step-2-http-parse/decision.md) (D-12) |
 | 파싱 결과 구조 | 값 복사 + 전체 헤더 목록 (헤더 수 상한은 설계) | [Step 2](./steps/step-2-http-parse/decision.md) |
 | 경로 탈출 방지 · 큰 파일 전송 | 문자열 검사 + `realpath` 접두 비교, 64KB 고정 버퍼 조각 전송 (구현 검증 통과) | [Step 3](./steps/step-3-static/decision.md) (D-21, D-22) |

@@ -1,4 +1,4 @@
-/* Step 2·3 단위 테스트: http_response를 socketpair로 시험한다(TC-2-05, TC-2-06, TC-3-09). */
+/* Step 2·3·4 단위 테스트: http_response를 socketpair로 시험한다(TC-2-05, TC-2-06, TC-3-09, TC-4-15). */
 #define _POSIX_C_SOURCE 200809L
 
 #include "../src/http_response.h"
@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 static int failures;
+static const http_response_extra close_extra = {NULL, NULL, HTTP_CONNECTION_CLOSE};
 
 static void check(const char *name, int condition, const char *detail)
 {
@@ -131,7 +132,7 @@ static int send_round_trip(int status, const char *ctype, const char *body, size
 
     setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
     errno = 0;
-    rc = http_response_send(fds[1], status, ctype, body, body_len);
+    rc = http_response_send(fds[1], status, ctype, body, body_len, &close_extra);
     *err = errno;
     close(fds[1]);
     *reply_len = read_all(fds[0], reply, cap);
@@ -181,7 +182,7 @@ static void test_write_failure(void)
     setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
     close(fds[0]);
     errno = 0;
-    rc = http_response_send(fds[1], 200, "text/plain", "x", 1);
+    rc = http_response_send(fds[1], 200, "text/plain", "x", 1, NULL);
     err = errno;
     check("TC-2-05 상대가 닫으면 -1, errno EPIPE", rc == -1 && err == EPIPE, strerror(err));
     close(fds[1]);
@@ -206,7 +207,7 @@ static void test_large_body(void)
     setup_or_die(pid >= 0, "fork");
     if (pid == 0) {
         close(fds[0]);
-        _exit(http_response_send(fds[1], 200, "application/octet-stream", body, body_len) == 0 ? 0 : 1);
+        _exit(http_response_send(fds[1], 200, "application/octet-stream", body, body_len, &close_extra) == 0 ? 0 : 1);
     }
     close(fds[1]);
     reply_len = read_all(fds[0], reply, cap);
@@ -241,32 +242,32 @@ typedef struct {
     int status;
     const char *ctype;
     size_t length;
-    const char *location;
+    http_response_extra extra;
 } call_args;
 
 static int call_send_head(int fd, const void *arg)
 {
     const call_args *a = arg;
-    return http_response_send_head(fd, a->status, a->ctype, a->length, a->location);
+    return http_response_send_head(fd, a->status, a->ctype, a->length, &a->extra);
 }
 
 static int call_send_status(int fd, const void *arg)
 {
     const call_args *a = arg;
-    return http_response_send_status(fd, a->status, a->location);
+    return http_response_send_status(fd, a->status, &a->extra);
 }
 
 static int call_send(int fd, const void *arg)
 {
     const call_args *a = arg;
-    return http_response_send(fd, a->status, a->ctype, "x", 1);
+    return http_response_send(fd, a->status, a->ctype, "x", 1, &a->extra);
 }
 
 /* TC-3-09: 머리만 쓰고 Content-Length는 인자 그대로, 빈 줄 뒤 바이트 없음, Location 없음. */
 static void test_send_head(void)
 {
     static char reply[4096];
-    call_args a = {200, "text/html; charset=utf-8", 12345, NULL};
+    call_args a = {200, "text/html; charset=utf-8", 12345, {NULL, NULL, HTTP_CONNECTION_CLOSE}};
     size_t reply_len, head_len;
     int rc, err;
 
@@ -346,11 +347,11 @@ static void test_send_status(void)
     char name[96];
 
     for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        call_args a = {cases[i].status, NULL, 0, cases[i].status == 301 ? "/sub/" : NULL};
+        call_args a = {cases[i].status, NULL, 0, {cases[i].status == 301 ? "/sub/" : NULL, NULL, HTTP_CONNECTION_CLOSE}};
         snprintf(name, sizeof(name), "TC-3-09 send_status %d", cases[i].status);
         rc = write_round_trip(call_send_status, &a, reply, sizeof(reply), &reply_len, &err);
         check(name, rc == 0, strerror(err));
-        check_status_reply(name, cases[i].status, cases[i].line, a.location, reply, reply_len);
+        check_status_reply(name, cases[i].status, cases[i].line, a.extra.location, reply, reply_len);
     }
 
     /* PATH_MAX바이트 Location(D-27 머리 버퍼 512 + PATH_MAX) */
@@ -359,7 +360,7 @@ static void test_send_status(void)
     long_location[PATH_MAX - 1] = '/';
     long_location[PATH_MAX] = '\0';
     {
-        call_args a = {301, NULL, 0, long_location};
+        call_args a = {301, NULL, 0, {long_location, NULL, HTTP_CONNECTION_CLOSE}};
         rc = write_round_trip(call_send_status, &a, reply, sizeof(reply), &reply_len, &err);
         check("TC-3-09 send_status 301 PATH_MAX바이트 Location 성공", rc == 0, strerror(err));
         check_status_reply("TC-3-09 PATH_MAX Location", 301, "HTTP/1.1 301 Moved Permanently\r\n", long_location, reply,
@@ -375,14 +376,28 @@ static void test_invalid_arguments(void)
         writer_fn fn;
         call_args a;
     } cases[] = {
-        {"send_status 400인데 location", call_send_status, {400, NULL, 0, "/x/"}},
-        {"send_status 301인데 NULL", call_send_status, {301, NULL, 0, NULL}},
-        {"send_status 418", call_send_status, {418, NULL, 0, NULL}},
-        {"send_status 200", call_send_status, {200, NULL, 0, NULL}},
-        {"send_head 200인데 location", call_send_head, {200, "text/plain", 1, "/x/"}},
-        {"send_head 301인데 NULL", call_send_head, {301, "text/plain", 1, NULL}},
-        {"send_head 418", call_send_head, {418, "text/plain", 1, NULL}},
-        {"send 301 (location을 줄 수 없다)", call_send, {301, "text/plain", 1, NULL}},
+        {"send_status 400인데 location", call_send_status, {400, NULL, 0, {"/x/", NULL, 0}}},
+        {"send_status 301인데 NULL", call_send_status, {301, NULL, 0, {NULL, NULL, 0}}},
+        {"send_status 418", call_send_status, {418, NULL, 0, {NULL, NULL, 0}}},
+        {"send_status 200", call_send_status, {200, NULL, 0, {NULL, NULL, 0}}},
+        {"send_head 200인데 location", call_send_head, {200, "text/plain", 1, {"/x/", NULL, 0}}},
+        {"send_head 301인데 NULL", call_send_head, {301, "text/plain", 1, {NULL, NULL, 0}}},
+        {"send_head 418", call_send_head, {418, "text/plain", 1, {NULL, NULL, 0}}},
+        {"send 301 (location을 줄 수 없다)", call_send, {301, "text/plain", 1, {NULL, NULL, 0}}},
+        /* TC-4-15: Allow 규칙(D-52) */
+        {"TC-4-15 send_status 405인데 allow NULL", call_send_status, {405, NULL, 0, {NULL, NULL, 0}}},
+        {"TC-4-15 send_status 404인데 allow", call_send_status, {404, NULL, 0, {NULL, "GET", 0}}},
+        {"TC-4-15 send_status 301에 allow", call_send_status, {301, NULL, 0, {"/x/", "GET", 0}}},
+        {"TC-4-15 send_status 405에 location", call_send_status, {405, NULL, 0, {"/x/", "GET", 0}}},
+        {"TC-4-15 send_head 405인데 allow NULL", call_send_head, {405, "text/plain", 1, {NULL, NULL, 0}}},
+        {"TC-4-15 send_head 200인데 allow", call_send_head, {200, "text/plain", 1, {NULL, "GET", 0}}},
+        {"TC-4-15 send에 location", call_send, {200, "text/plain", 1, {"/x/", NULL, 0}}},
+        {"TC-4-15 send에 allow (405)", call_send, {405, "text/plain", 1, {NULL, "GET", 0}}},
+        {"TC-4-15 send 405 (allow를 줄 수 없다)", call_send, {405, "text/plain", 1, {NULL, NULL, 0}}},
+        /* TC-4-15: 100은 전용 함수만 쓴다 */
+        {"TC-4-15 send_head 100", call_send_head, {100, "text/plain", 0, {NULL, NULL, 0}}},
+        {"TC-4-15 send_status 100", call_send_status, {100, NULL, 0, {NULL, NULL, 0}}},
+        {"TC-4-15 send 100", call_send, {100, "text/plain", 1, {NULL, NULL, 0}}},
     };
     static char reply[4096];
     size_t i, reply_len;
@@ -396,17 +411,139 @@ static void test_invalid_arguments(void)
     }
 }
 
+/* TC-4-15: 새 상태·Allow·머리 순서. */
+static void test_step4_statuses(void)
+{
+    static const struct {
+        int status;
+        const char *line;
+        const char *allow;
+    } cases[] = {
+        {405, "HTTP/1.1 405 Method Not Allowed\r\n", "GET"},
+        {413, "HTTP/1.1 413 Content Too Large\r\n", NULL},
+        {414, "HTTP/1.1 414 URI Too Long\r\n", NULL},
+        {431, "HTTP/1.1 431 Request Header Fields Too Large\r\n", NULL},
+    };
+    static char reply[4096];
+    size_t i, reply_len;
+    int rc, err;
+    char name[96];
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        call_args a = {cases[i].status, NULL, 0, {NULL, cases[i].allow, HTTP_CONNECTION_CLOSE}};
+        snprintf(name, sizeof(name), "TC-4-15 send_status %d", cases[i].status);
+        rc = write_round_trip(call_send_status, &a, reply, sizeof(reply), &reply_len, &err);
+        check(name, rc == 0, strerror(err));
+        check_status_reply(name, cases[i].status, cases[i].line, NULL, reply, reply_len);
+    }
+    {
+        call_args a = {405, NULL, 0, {NULL, "POST", HTTP_CONNECTION_NONE}};
+        rc = write_round_trip(call_send_status, &a, reply, sizeof(reply), &reply_len, &err);
+        check("TC-4-15 405 Allow: POST 성공", rc == 0, strerror(err));
+        check("TC-4-15 405 Allow는 Content-Length 뒤 마지막 머리",
+              find(reply, reply_len, "\r\nContent-Length: 23\r\nAllow: POST\r\n\r\n") != (size_t)-1, "순서가 다르다");
+    }
+    {
+        size_t date, ctype, clen, allow, conn;
+        call_args a = {405, NULL, 0, {NULL, "GET", HTTP_CONNECTION_KEEP_ALIVE}};
+        rc = write_round_trip(call_send_status, &a, reply, sizeof(reply), &reply_len, &err);
+        date = find(reply, reply_len, "\r\nDate: ");
+        ctype = find(reply, reply_len, "\r\nContent-Type: ");
+        clen = find(reply, reply_len, "\r\nContent-Length: ");
+        allow = find(reply, reply_len, "\r\nAllow: GET\r\n");
+        conn = find(reply, reply_len, "\r\nConnection: keep-alive\r\n\r\n");
+        check("TC-4-15 머리 순서 Date, Content-Type, Content-Length, Allow, Connection",
+              rc == 0 && date < ctype && ctype < clen && clen < allow && allow < conn && conn != (size_t)-1,
+              "순서가 다르다");
+        check("TC-4-15 Date가 상태 줄 바로 다음", date == strlen("HTTP/1.1 405 Method Not Allowed"), "다르다");
+    }
+}
+
+/* TC-4-15: Connection 세 값(D-52). */
+static void test_connection_values(void)
+{
+    static const struct {
+        const char *name;
+        http_connection connection;
+        const char *want; /* NULL이면 Connection 머리가 없어야 한다 */
+    } cases[] = {
+        {"TC-4-15 Connection 넣지 않음", HTTP_CONNECTION_NONE, NULL},
+        {"TC-4-15 Connection: close", HTTP_CONNECTION_CLOSE, "\r\nContent-Length: 1\r\nConnection: close\r\n\r\n"},
+        {"TC-4-15 Connection: keep-alive", HTTP_CONNECTION_KEEP_ALIVE,
+         "\r\nContent-Length: 1\r\nConnection: keep-alive\r\n\r\n"},
+    };
+    static char reply[4096];
+    size_t i, reply_len;
+    int rc, err;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        call_args a = {200, "text/plain", 1, {NULL, NULL, cases[i].connection}};
+        rc = write_round_trip(call_send, &a, reply, sizeof(reply), &reply_len, &err);
+        if (cases[i].want == NULL) {
+            check(cases[i].name, rc == 0 && find(reply, reply_len, "Connection") == (size_t)-1 &&
+                                     find(reply, reply_len, "\r\nContent-Length: 1\r\n\r\nx") != (size_t)-1,
+                  "Connection 머리가 있다");
+        } else {
+            check(cases[i].name, rc == 0 && find(reply, reply_len, cases[i].want) != (size_t)-1, "다르다");
+        }
+    }
+    {
+        int fds[2];
+        setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
+        errno = 0;
+        rc = http_response_send_head(fds[1], 200, "text/plain", 0, NULL);
+        err = errno;
+        close(fds[1]);
+        reply_len = read_all(fds[0], reply, sizeof(reply));
+        close(fds[0]);
+        check("TC-4-15 추가 머리 NULL = 모두 없음",
+              rc == 0 && find(reply, reply_len, "Connection") == (size_t)-1 &&
+                  find(reply, reply_len, "Location") == (size_t)-1 && find(reply, reply_len, "Allow") == (size_t)-1,
+              strerror(err));
+    }
+}
+
+static int call_continue(int fd, const void *arg)
+{
+    (void)arg;
+    return http_response_send_continue(fd);
+}
+
+/* TC-4-15: 100 전용 함수는 상태 줄과 빈 줄만 쓴다. */
+static void test_continue(void)
+{
+    static const char want[] = "HTTP/1.1 100 Continue\r\n\r\n";
+    static char reply[256];
+    size_t reply_len;
+    int fds[2], rc, err;
+
+    rc = write_round_trip(call_continue, NULL, reply, sizeof(reply), &reply_len, &err);
+    check("TC-4-15 100 Continue 정확한 바이트", rc == 0 && reply_len == sizeof(want) - 1 &&
+                                                  memcmp(reply, want, reply_len) == 0,
+          "다르다");
+    setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
+    close(fds[0]);
+    errno = 0;
+    rc = http_response_send_continue(fds[1]);
+    err = errno;
+    close(fds[1]);
+    check("TC-4-15 100 쓰기 실패 -1, errno EPIPE", rc == -1 && err == EPIPE, strerror(err));
+}
+
 int main(void)
 {
     alarm(10); /* 멈추면 끝없이 기다리지 않게 한다 */
     signal(SIGPIPE, SIG_IGN); /* D-05: 서버와 같은 조건 */
-    printf("test_http_response (TC-2-05, TC-2-06, TC-3-09)\n");
+    printf("test_http_response (TC-2-05, TC-2-06, TC-3-09, TC-4-15)\n");
     test_statuses();
     test_write_failure();
     test_large_body();
     test_send_head();
     test_send_status();
     test_invalid_arguments();
+    test_step4_statuses();
+    test_connection_values();
+    test_continue();
 
     if (failures > 0) {
         printf("실패 %d건\n", failures);
