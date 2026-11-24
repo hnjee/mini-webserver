@@ -1,5 +1,6 @@
 /*
  * Step 2 파싱 단위 테스트: docs/tests/step2.md 3장 UT-01 ~ UT-39
+ * Step 4 파싱 단위 테스트: docs/tests/step4.md 3장 UT-01 ~ UT-23 (이름 앞에 S4를 붙인다)
  * http.c 함수를 소켓 없이 문자열만으로 확인한다.
  * http_parse_request()는 버퍼 안에 '\0'을 쓰므로, 요청을 배열에 복사해서 넘긴다.
  */
@@ -147,7 +148,7 @@ static void ut14_to_ut26_request_line(void)
     CHECK("UT-20 HTTPS/1.1 → 400", parse_line(S("GET / HTTPS/1.1")) == 400);
     CHECK("UT-21 HTTP/a.b → 400", parse_line(S("GET / HTTP/a.b")) == 400);
     CHECK("UT-22 BREW → 501", parse_line(S("BREW / HTTP/1.1")) == 501);
-    CHECK("UT-23 POST → 501", parse_line(S("POST / HTTP/1.1")) == 501);
+    CHECK("UT-23 POST → 0 (Step 4부터 받음)", parse_line(S("POST / HTTP/1.1")) == 0);
     CHECK("UT-24 소문자 get → 501", parse_line(S("get / HTTP/1.1")) == 501);
     CHECK("UT-25 HTTP/2.0 → 505", parse_line(S("GET / HTTP/2.0")) == 505);
     CHECK("UT-26 HTTP/0.9 → 505", parse_line(S("GET / HTTP/0.9")) == 505);
@@ -195,6 +196,84 @@ static void ut39_reason(void)
     CHECK("UT-39 505 HTTP Version Not Supported", str_eq(http_reason(505), "HTTP Version Not Supported"));
 }
 
+/* ---- Step 4: Content-Length, keep-alive, POST, URI 길이 ---- */
+
+/* "GET / <ver>\r\n" + headers + "\r\n" 을 파싱한다 */
+static int parse_with(const char *ver, const char *headers)
+{
+    char req[1024];
+    int n = snprintf(req, sizeof(req), "GET / %s\r\n%s\r\n", ver, headers);
+    return parse(req, (size_t)n);
+}
+
+/* headers를 붙인 HTTP/1.1 요청을 파싱하고 http_content_length() 결과를 돌려준다 */
+static int cl_of(const char *headers, size_t *out)
+{
+    *out = 12345;
+    if (parse_with("HTTP/1.1", headers) != 0)
+        return -100;
+    return http_content_length(&g_req, out);
+}
+
+static void s4_ut01_to_ut11_content_length(void)
+{
+    size_t v;
+    CHECK("S4 UT-01 없음 → 0, out 0", cl_of("Host: x\r\n", &v) == 0 && v == 0);
+    CHECK("S4 UT-02 11 → 1, out 11", cl_of("Host: x\r\nContent-Length: 11\r\n", &v) == 1 && v == 11);
+    CHECK("S4 UT-03 0 → 1, out 0", cl_of("Host: x\r\nContent-Length: 0\r\n", &v) == 1 && v == 0);
+    CHECK("S4 UT-04 abc → -1", cl_of("Host: x\r\nContent-Length: abc\r\n", &v) == -1);
+    CHECK("S4 UT-05 -5 → -1", cl_of("Host: x\r\nContent-Length: -5\r\n", &v) == -1);
+    CHECK("S4 UT-06 값 없음 → -1", cl_of("Host: x\r\nContent-Length:\r\n", &v) == -1);
+    CHECK("S4 UT-07 1 1 → -1", cl_of("Host: x\r\nContent-Length: 1 1\r\n", &v) == -1);
+    CHECK("S4 UT-08 같은 값 두 번 → 1, out 5",
+          cl_of("Host: x\r\nContent-Length: 5\r\nContent-Length: 5\r\n", &v) == 1 && v == 5);
+    CHECK("S4 UT-09 다른 값 두 번 → -1",
+          cl_of("Host: x\r\nContent-Length: 5\r\nContent-Length: 7\r\n", &v) == -1);
+    CHECK("S4 UT-10 넘침 → -1", cl_of("Host: x\r\nContent-Length: 99999999999999999999999\r\n", &v) == -1);
+    CHECK("S4 UT-11 소문자 이름 → 1, out 3", cl_of("Host: x\r\ncontent-length: 3\r\n", &v) == 1 && v == 3);
+}
+
+static int keep_of(const char *ver, const char *headers)
+{
+    if (parse_with(ver, headers) != 0)
+        return -100;
+    return http_keep_alive(&g_req);
+}
+
+static void s4_ut12_to_ut18_keep_alive(void)
+{
+    CHECK("S4 UT-12 1.1 없음 → 1", keep_of("HTTP/1.1", "Host: x\r\n") == 1);
+    CHECK("S4 UT-13 1.1 close → 0", keep_of("HTTP/1.1", "Host: x\r\nConnection: close\r\n") == 0);
+    CHECK("S4 UT-14 1.1 Close → 0", keep_of("HTTP/1.1", "Host: x\r\nConnection: Close\r\n") == 0);
+    CHECK("S4 UT-15 1.1 keep-alive → 1", keep_of("HTTP/1.1", "Host: x\r\nConnection: keep-alive\r\n") == 1);
+    CHECK("S4 UT-16 1.0 없음 → 0", keep_of("HTTP/1.0", "") == 0);
+    CHECK("S4 UT-17 1.0 keep-alive → 1", keep_of("HTTP/1.0", "Connection: keep-alive\r\n") == 1);
+    CHECK("S4 UT-18 1.0 Keep-Alive → 1", keep_of("HTTP/1.0", "Connection: Keep-Alive\r\n") == 1);
+}
+
+/* "<method> /aaa…(path_len바이트) <ver>\r\nHost: x\r\n\r\n" 을 파싱한다 */
+static int parse_long_path(const char *method, size_t path_len, const char *ver)
+{
+    static char req[8192];
+    size_t n = (size_t)snprintf(req, sizeof(req), "%s /", method);
+    memset(req + n, 'a', path_len - 1);
+    n += path_len - 1;
+    n += (size_t)snprintf(req + n, sizeof(req) - n, " %s\r\nHost: x\r\n\r\n", ver);
+    return parse(req, n);
+}
+
+static void s4_ut19_to_ut23_request_line(void)
+{
+    CHECK("S4 UT-19 POST → 0", parse_line(S("POST / HTTP/1.1")) == 0);
+    CHECK("S4 UT-20 경로 4096바이트 → 0", parse_long_path("GET", 4096, "HTTP/1.1") == 0);
+    CHECK("S4 UT-21 경로 4097바이트 → 414", parse_long_path("GET", 4097, "HTTP/1.1") == 414);
+    CHECK("S4 UT-22 URI가 메서드·버전보다 먼저 → 414", parse_long_path("BREW", 4097, "HTTP/2.0") == 414);
+    CHECK("S4 UT-23 405", str_eq(http_reason(405), "Method Not Allowed"));
+    CHECK("S4 UT-23 411", str_eq(http_reason(411), "Length Required"));
+    CHECK("S4 UT-23 413", str_eq(http_reason(413), "Content Too Large"));
+    CHECK("S4 UT-23 414", str_eq(http_reason(414), "URI Too Long"));
+}
+
 int main(void)
 {
     printf("test_http\n");
@@ -208,6 +287,9 @@ int main(void)
     ut27_to_ut34_headers();
     ut35_to_ut38_order();
     ut39_reason();
+    s4_ut01_to_ut11_content_length();
+    s4_ut12_to_ut18_keep_alive();
+    s4_ut19_to_ut23_request_line();
     printf("%d개 중 %d개 통과\n", g_run, g_run - g_fail);
     return g_fail == 0 ? 0 : 1;
 }
