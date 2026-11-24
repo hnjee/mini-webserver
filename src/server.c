@@ -1,6 +1,6 @@
 /*
- * 서버: docs/design/step1.md, step2.md, step3.md
- * 리슨 소켓을 준비하고, 연결을 하나씩 받아 요청 하나를 읽고 파일이나 오류 응답 하나를 보낸 뒤 닫는다.
+ * 서버: docs/design/step1.md ~ step4.md
+ * 리슨 소켓을 준비하고, 연결을 하나씩 받아 닫을 때까지 요청을 읽고 응답하기를 반복한다 (keep-alive).
  */
 #include "server.h"
 
@@ -16,10 +16,12 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #define DRAIN_LIMIT (16 * 1024)
 #define FILE_BUF_SIZE 8192
+#define IDLE_TIMEOUT_SEC 15
 
 int server_listen(int port)
 {
@@ -71,20 +73,23 @@ int write_all(int fd, const char *buf, size_t len)
     return 0;
 }
 
-/* 오류 응답을 보내요. 상태 줄과 헤더, "코드 문구\n" 본문. 200은 send_file()이 보내요 */
-static int send_response(int fd, int status)
+/* 오류 응답을 보내요. 본문은 "코드 문구\n", extra는 "Allow: GET" 같은 헤더 한 줄이거나 NULL */
+static int send_error(int fd, int status, int keep, const char *extra)
 {
-    char res[256];
+    char res[512];
     char body[64];
     int body_len = snprintf(body, sizeof(body), "%d %s\n", status, http_reason(status));
     int n = snprintf(res, sizeof(res),
                      "HTTP/1.1 %d %s\r\n"
                      "Content-Type: text/plain\r\n"
                      "Content-Length: %d\r\n"
-                     "Connection: close\r\n"
+                     "%s%s"
+                     "Connection: %s\r\n"
                      "\r\n"
                      "%s",
-                     status, http_reason(status), body_len, body);
+                     status, http_reason(status), body_len,
+                     extra ? extra : "", extra ? "\r\n" : "",
+                     keep ? "keep-alive" : "close", body);
     return write_all(fd, res, (size_t)n);
 }
 
@@ -92,7 +97,7 @@ static int send_response(int fd, int status)
  * 파일을 열어 200 헤더와 내용을 8KB씩 보내요.
  * 0: 다 보냄, 403·404·500: 아무것도 안 보냄(오류 응답을 보낼 것), -1: 헤더를 보낸 뒤 실패(닫기만 할 것)
  */
-static int send_file(int fd, const char *file)
+static int send_file(int fd, const char *file, int keep)
 {
     int ffd = open(file, O_RDONLY);
     if (ffd < 0) {
@@ -115,9 +120,9 @@ static int send_file(int fd, const char *file)
                      "HTTP/1.1 200 OK\r\n"
                      "Content-Type: %s\r\n"
                      "Content-Length: %lld\r\n"
-                     "Connection: close\r\n"
+                     "Connection: %s\r\n"
                      "\r\n",
-                     mime_type(file), (long long)st.st_size);
+                     mime_type(file), (long long)st.st_size, keep ? "keep-alive" : "close");
     if (write_all(fd, head, (size_t)n) < 0) {
         close(ffd);
         return -1;
@@ -167,47 +172,174 @@ static void drain(int fd)
     }
 }
 
-int handle_conn(struct conn *c, const char *root_real)
+/* read()가 15초 넘게 기다리면 -1(EAGAIN)로 돌아오게 해요 (S4-13) */
+static void set_read_timeout(int fd)
 {
-    size_t end;
-    int status = 0;
+    struct timeval tv = {IDLE_TIMEOUT_SEC, 0};
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
+        perror("setsockopt SO_RCVTIMEO");
+}
 
-    while ((end = http_find_header_end(c->buf, c->len)) == 0) {
-        if (c->len == sizeof(c->buf)) {          /* 헤더의 끝 전에 버퍼가 참 */
-            status = 431;
-            break;
-        }
+/* 버퍼에 남은 것부터 헤더의 끝까지 읽어요. 0: 찾음(*end), 431: 버퍼 가득, -1: 끊김·타임아웃·실패 */
+static int read_header(struct conn *c, size_t *end)
+{
+    while ((*end = http_find_header_end(c->buf, c->len)) == 0) {
+        if (c->len == sizeof(c->buf))
+            return 431;
         ssize_t n = read(c->fd, c->buf + c->len, sizeof(c->buf) - c->len);
         if (n == 0)
-            return -1;                           /* 헤더의 끝 전에 끊김: 응답 없음 */
+            return -1;                           /* 클라이언트가 끊음 */
         if (n < 0) {
             if (errno == EINTR)
                 continue;
-            perror("read");
-            return -1;
+            if (errno != EAGAIN && errno != EWOULDBLOCK)
+                perror("read");
+            return -1;                           /* 타임아웃이거나 실패 */
         }
         c->len += (size_t)n;
     }
-
-    if (status == 0)
-        status = http_parse_request(c->buf, end, &c->req);
-    if (status == 0) {
-        char file[PATH_MAX];
-        status = resolve_path(root_real, c->req.path, file, sizeof(file));
-        if (status == 0) {
-            status = send_file(c->fd, file);
-            if (status < 0)
-                return -1;                       /* 보내다 끊김: 오류 응답 없이 닫기 */
-            if (status == 0) {
-                drain(c->fd);
-                return 0;
-            }
-        }
-    }
-    if (send_response(c->fd, status) < 0)
-        return -1;
-    drain(c->fd);
     return 0;
+}
+
+/* 본문 길이를 정해요. 0: *cl에 길이, 그 밖: 경계를 알 수 없어 보낼 상태 코드 (400·411·413·501) */
+static int body_length(const struct http_request *req, size_t *cl)
+{
+    if (http_find_header(req, "Transfer-Encoding") != NULL)
+        return 501;
+    int r = http_content_length(req, cl);
+    if (r < 0)
+        return 400;
+    if (r == 0 && strcmp(req->method, "POST") == 0)
+        return 411;
+    if (*cl > HTTP_MAX_BODY)
+        return 413;
+    return 0;
+}
+
+/* 헤더 버퍼에 온 본문을 옮기고 모자란 만큼 더 읽어 c->body에 모아요. *consumed: 헤더 버퍼에서 이 요청이 쓴 바이트 수 */
+static int read_body(struct conn *c, size_t end, size_t cl, size_t *consumed)
+{
+    size_t have = c->len - end;
+    if (have > cl)
+        have = cl;                               /* 그 뒤는 다음 요청 */
+    *consumed = end + have;
+    if (cl == 0)
+        return 0;
+
+    c->body = malloc(cl);
+    if (c->body == NULL) {
+        perror("malloc");
+        return -1;
+    }
+    memcpy(c->body, c->buf + end, have);
+    c->body_len = have;
+
+    while (c->body_len < cl) {
+        ssize_t n = read(c->fd, c->body + c->body_len, cl - c->body_len);
+        if (n == 0)
+            return -1;
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            if (errno != EAGAIN && errno != EWOULDBLOCK)
+                perror("read");
+            return -1;
+        }
+        c->body_len += (size_t)n;
+    }
+    return 0;
+}
+
+/* 받은 본문을 그대로 돌려줘요. Content-Type은 요청 값, 없으면 application/octet-stream (S4-07) */
+static int send_echo(int fd, const struct conn *c, int keep)
+{
+    const char *type = http_find_header(&c->req, "Content-Type");
+    char head[HEADER_BUF_SIZE];
+    int n = snprintf(head, sizeof(head),
+                     "HTTP/1.1 200 OK\r\n"
+                     "Content-Type: %s\r\n"
+                     "Content-Length: %zu\r\n"
+                     "Connection: %s\r\n"
+                     "\r\n",
+                     type != NULL ? type : "application/octet-stream",
+                     c->body_len, keep ? "keep-alive" : "close");
+    if (write_all(fd, head, (size_t)n) < 0)
+        return -1;
+    if (c->body_len > 0 && write_all(fd, c->body, c->body_len) < 0)
+        return -1;
+    return 0;
+}
+
+/* path가 name과 같은지. ? 뒤 쿼리 문자열은 무시해요 */
+static int path_is(const char *path, const char *name)
+{
+    size_t n = strlen(name);
+    return strncmp(path, name, n) == 0 && (path[n] == '\0' || path[n] == '?');
+}
+
+/* 본문 버퍼를 해제하고 비워 둬요 */
+static void free_body(struct conn *c)
+{
+    free(c->body);
+    c->body = NULL;
+    c->body_len = 0;
+}
+
+/* 경로와 메서드에 맞는 응답 하나를 보내요. 0: 보냄, -1: 보내다 끊김 */
+static int respond(struct conn *c, const char *root_real, int keep)
+{
+    int post = strcmp(c->req.method, "POST") == 0;
+
+    if (path_is(c->req.path, "/echo"))
+        return post ? send_echo(c->fd, c, keep) : send_error(c->fd, 405, keep, "Allow: POST");
+    if (post)
+        return send_error(c->fd, 405, keep, "Allow: GET");
+
+    char file[PATH_MAX];
+    int status = resolve_path(root_real, c->req.path, file, sizeof(file));
+    if (status == 0) {
+        status = send_file(c->fd, file, keep);
+        if (status <= 0)
+            return status;                       /* 0: 보냄, -1: 보내다 끊김 */
+    }
+    return send_error(c->fd, status, keep, NULL);
+}
+
+
+int handle_conn(struct conn *c, const char *root_real)
+{
+    for (;;) {
+        size_t end = 0, cl = 0, consumed = 0;
+        int status = read_header(c, &end);
+        if (status < 0)
+            return c->len == 0 ? 0 : -1;         /* 요청 사이에서 끊김은 정상 종료, 요청 중간이면 비정상 */
+        if (status == 0)
+            status = http_parse_request(c->buf, end, &c->req);
+        if (status == 0)
+            status = body_length(&c->req, &cl);
+        if (status != 0) {                       /* 경계를 모름: 닫기 */
+            send_error(c->fd, status, 0, NULL);
+            drain(c->fd);
+            return 0;
+        }
+        if (read_body(c, end, cl, &consumed) < 0) {
+            free_body(c);
+            return -1;
+        }
+
+        int keep = http_keep_alive(&c->req);
+        int r = respond(c, root_real, keep);     /* 경로별 처리, 0 또는 -1 */
+        free_body(c);
+        if (r < 0)
+            return -1;                           /* 보내다 끊김 */
+        if (!keep) {
+            drain(c->fd);
+            return 0;
+        }
+
+        memmove(c->buf, c->buf + consumed, c->len - consumed);
+        c->len -= consumed;
+    }
 }
 
 void server_run(int listen_fd, const char *root_real)
@@ -226,8 +358,11 @@ void server_run(int listen_fd, const char *root_real)
             close(client_fd);
             continue;
         }
+        set_read_timeout(client_fd);
         c->fd = client_fd;
         c->len = 0;
+        c->body = NULL;
+        c->body_len = 0;
 
         handle_conn(c, root_real);
 

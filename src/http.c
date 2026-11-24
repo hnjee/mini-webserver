@@ -5,6 +5,7 @@
 #include "http.h"
 
 #include <ctype.h>
+#include <stdint.h>
 #include <string.h>
 #include <strings.h>
 
@@ -52,7 +53,9 @@ static int parse_request_line(char *line, struct http_request *req)
 
     if (req->method[0] == '\0' || req->path[0] != '/' || !is_version_shape(req->version))
         return 400;
-    if (strcmp(req->method, "GET") != 0)
+    if (strlen(req->path) > HTTP_MAX_URI)
+        return 414;
+    if (strcmp(req->method, "GET") != 0 && strcmp(req->method, "POST") != 0)
         return 501;
     if (strcmp(req->version, "HTTP/1.0") != 0 && strcmp(req->version, "HTTP/1.1") != 0)
         return 505;
@@ -131,10 +134,49 @@ const char *http_reason(int status)
     case 400: return "Bad Request";
     case 403: return "Forbidden";
     case 404: return "Not Found";
+    case 405: return "Method Not Allowed";
+    case 411: return "Length Required";
+    case 413: return "Content Too Large";
+    case 414: return "URI Too Long";
     case 431: return "Request Header Fields Too Large";
     case 500: return "Internal Server Error";
     case 501: return "Not Implemented";
     case 505: return "HTTP Version Not Supported";
     default:  return "Unknown";
     }
+}
+
+/* Content-Length를 읽어 *out에 넣어요. 없으면 0, 있으면 1, 숫자가 아니거나 값이 서로 다르면 -1 */
+int http_content_length(const struct http_request *req, size_t *out)
+{
+    int found = 0;
+    size_t val = 0;
+    for (int i = 0; i < req->header_count; i++) {
+        if (strcasecmp(req->headers[i].name, "Content-Length") != 0)
+            continue;
+        const char *p = req->headers[i].value;
+        if (*p == '\0')
+            return -1;
+        size_t n = 0;
+        for (; *p != '\0'; p++) {
+            if (!isdigit((unsigned char)*p) || n > (SIZE_MAX - 9) / 10)
+                return -1;                       /* 숫자가 아니거나 넘침 */
+            n = n * 10 + (size_t)(*p - '0');
+        }
+        if (found && n != val)
+            return -1;                           /* 서로 다른 값 */
+        found = 1;
+        val = n;
+    }
+    *out = val;
+    return found;
+}
+
+/* 버전과 Connection 헤더로 연결 유지 여부를 정해요. 1.1은 close가 없으면 유지, 1.0은 keep-alive가 있으면 유지 */
+int http_keep_alive(const struct http_request *req)
+{
+    const char *conn = http_find_header(req, "Connection");
+    if (strcmp(req->version, "HTTP/1.1") == 0)
+        return !(conn != NULL && strcasecmp(conn, "close") == 0);
+    return conn != NULL && strcasecmp(conn, "keep-alive") == 0;
 }
