@@ -19,6 +19,7 @@ Step 2의 200 응답(`Content-Length: 0`)은 Step 3부터 파일 응답으로 �
 - `make www`로 `www/large.bin`과 읽기 권한이 없는 `www/secret.txt`를 만들어요.
 - 단위 테스트는 `/tmp` 아래에 테스트용 루트를 만들고 끝나면 지워요. 저장소의 `www/`는 건드리지 않아요.
 - root 사용자는 권한 000 파일도 읽을 수 있어서, 권한 테스트(UT-37, FT-12)는 일반 사용자로 해요.
+- 헤더만 볼 때 `curl -I`는 쓰지 않아요. `-I`는 GET이 아니라 HEAD 요청이라 우리 서버는 501로 답해요. 대신 `curl -s -D - -o /dev/null`로 GET을 보내고 헤더만 출력해요.
 
 ## 3. 단위 테스트: 경로·MIME (`tests/test_file.c`)
 
@@ -106,11 +107,11 @@ Step 2의 200 응답(`Content-Length: 0`)은 Step 3부터 파일 응답으로 �
 | FT-02 | S3-02 | `curl -s http://localhost:8080/ \| cmp - www/index.html && echo same` | `same` |
 | FT-03 | S3-03 | `mkdir -p www/empty`<br>`curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/empty/`<br>`rmdir www/empty` | `403` |
 | FT-04 | S3-04 | `curl -s 'http://localhost:8080/style.css?v=3' \| cmp - www/style.css && echo same` | `same` |
-| FT-05 | S3-05 | `curl -sI http://localhost:8080/style.css \| grep -i content-length`<br>`stat -c %s www/style.css` | 두 숫자가 같다 |
+| FT-05 | S3-05 | `curl -s -D - -o /dev/null http://localhost:8080/style.css \| grep -i content-length`<br>`stat -c %s www/style.css` | 두 숫자가 같다 |
 | FT-06 | S3-06 | `curl -s http://localhost:8080/image.png \| cmp - www/image.png && echo same`<br>`curl -s http://localhost:8080/photo.jpg \| cmp - www/photo.jpg && echo same` | `same` 두 번 |
 | FT-07 | S3-07 | `curl -s http://localhost:8080/large.bin \| cmp - www/large.bin && echo same` | `same` |
-| FT-08 | S3-08 | `for f in index.html style.css app.js image.png photo.jpg; do curl -sI http://localhost:8080/$f \| grep -i content-type; done` | `text/html; charset=utf-8`, `text/css; charset=utf-8`, `text/javascript; charset=utf-8`, `image/png`, `image/jpeg` |
-| FT-09 | S3-10 | `curl -sI http://localhost:8080/large.bin \| grep -i content-type` | `Content-Type: application/octet-stream` |
+| FT-08 | S3-08 | `for f in index.html style.css app.js image.png photo.jpg; do curl -s -D - -o /dev/null http://localhost:8080/$f \| grep -i content-type; done` | `text/html; charset=utf-8`, `text/css; charset=utf-8`, `text/javascript; charset=utf-8`, `image/png`, `image/jpeg` |
+| FT-09 | S3-10 | `curl -s -D - -o /dev/null http://localhost:8080/large.bin \| grep -i content-type` | `Content-Type: application/octet-stream` |
 | FT-10 | S3-11 | `curl -s -o /dev/null -w '%{http_code}\n' --path-as-is http://localhost:8080/../../etc/passwd` | `403` |
 | FT-11 | S3-12 | `ln -s /etc www/link`<br>`curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/link/passwd`<br>`rm www/link` | `403` |
 | FT-12 | S3-14 | `curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/secret.txt` | `403` |
@@ -138,4 +139,4 @@ Step 2의 200 응답(`Content-Length: 0`)은 Step 3부터 파일 응답으로 �
 
 | 날짜 | 커밋 | 단위 (UT) | 기능 (FT) | 코드 리뷰 (CR) | 비고 |
 | --- | --- | --- | --- | --- | --- |
-| | | / 39 | / 15 | / 7 | |
+| 2026-11-24 | (구현 커밋) | 39 / 39 | 13 / 15 | / 7 | `test_file` 32/32, `test_server` 39/39 (UT-37 통과). FT-12(권한)는 Windows 마운트라 권한을 못 바꿔 확인 못 함, FT-14(브라우저)·FT-15(ASan 서버)는 아직. 코드 리뷰 기록 없음 |

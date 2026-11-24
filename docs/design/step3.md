@@ -138,13 +138,17 @@ flowchart TD
     D -- 아님 --> F403
     D -- 맞음 --> E{"디렉터리?"}
     E -- 아님 --> OK["0: 이 파일을 보냄"]
-    E -- 맞음 --> G["경로 뒤에 /index.html 붙이기"]
-    G --> C
+    E -- 맞음 --> G["realpath(디렉터리 + /index.html)"]
+    G -- 실패 --> F403
+    G -- 성공 --> H{"루트 안?"}
+    H -- 아님 --> F403
+    H -- 맞음 --> OK
 ```
 
-- `realpath()` 실패: 파일이 없으면(`ENOENT`, `ENOTDIR`) 404, 권한이 없으면(`EACCES`) 403, 그 밖은 500이에요. 단, `index.html`을 찾다가 없으면 404가 아니라 403이에요. (S3-03)
+- `realpath()` 실패: 파일이 없으면(`ENOENT`, `ENOTDIR`) 404, 권한이 없으면(`EACCES`) 403, 그 밖은 500이에요.
+- `index.html`을 찾다가 없으면 404가 아니라 403이에요. (S3-03)
 - 루트와 경로를 이은 길이가 `PATH_MAX`를 넘으면 `realpath()` 전에 404예요.
-- `index.html`도 링크일 수 있어서, 다시 `realpath()`와 루트 안인지를 거쳐요.
+- `index.html`도 링크일 수 있어서, `realpath()`와 루트 안인지를 한 번 더 거쳐요. `index.html`이 디렉터리인지는 다시 보지 않으니 반복은 없어요. (디렉터리면 `send_file()`이 403으로 걸러요)
 
 ```c
 /* realpath() 실패 이유를 상태 코드로 */
