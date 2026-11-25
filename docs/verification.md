@@ -15,7 +15,7 @@
 | [Step 3](./steps/step-3-static/README.md) | ✅ 통과 | 2026-11-23 | TC-3-01~19 독립 실행 통과(Mavuika, 최종 소스 해시 일치), 단위 검사 412건(전체 `make test`, ASan, 비root), 빌드 경고 0건. 변이 시험 23개 중 18개를 시험이 잡았고 나머지는 주입 시험·설계상 이중 방어로 확인. 머리 전송 뒤 실패 경로는 `read`·`close` 주입 시험으로 확인. 스크린샷은 눈으로 판정하지 못하고 DOM 계산 스타일·JS 실행·이미지 크기로 판정. |
 | [Step 4](./steps/step-4-post-keepalive/README.md) | ✅ 통과 | 2026-11-25 | 이전 독립 재확인: TC-4-01~36 통과, `make test` 675 ok줄·실패 0, 결함 주입 7개 검출. |
 | [Step 5](./steps/step-5-concurrency/README.md) | ✅ 통과 | 2026-11-25 | Ubuntu 독립 ASan 빌드·단위 ok 742줄/실패 0; `nc` 중 `curl` 200; `ab -n 2000 -c 50` 실패 0·5,191.97 req/s. TC-5-08은 이전 22개 기능 ID 재사용·TC-4-17 대체·TC-3-01 Chrome 신규 실행으로 현행 기능 24개 ID 확인. |
-| [Step 6](./steps/step-6-reverse-proxy/README.md) | ⬜ | - | - |
+| [Step 6](./steps/step-6-reverse-proxy/README.md) | ✅ 통과 | 2026-11-25 | TC-6-01~14 독립 검증(Mavuika). 실제 네트워크로 교대·502·504·조기 413·연결 유지·정적 회귀 확인. 설정 파서 넘침(F1) 수정 뒤 재확인 통과. 전체 `make -B test` 918 ok는 구현자 실행을 해시 일치로 재사용. |
 | [Step 7](./steps/step-7-robustness/README.md) | ⬜ | - | - |
 | [Step 8](./steps/step-8-final/README.md) | ⬜ | - | - |
 

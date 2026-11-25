@@ -1,5 +1,6 @@
 /*
  * Step 5 단위 테스트(TC-5-11): server_loop를 자식 프로세스에서 AF_UNIX 듣는 소켓으로 돌리고 클라이언트로 시험한다.
+ * Step 6(TC-6-13 루프 범위): 127.0.0.1 TCP 백엔드(자식 프로세스)로 라우팅해 두 소켓 등록·백엔드 소켓 교체·504 중 동시 정적·502를 본다.
  * - accept 재시도 오류는 링크 단계 -Wl,--wrap=accept4로 주입한다(제품 코드에는 시험용 분기가 없다).
  * - 끝난 연결 fd 재사용은 결정적으로 재현하지 않는다. 같은 회차에 끝나는 연결과 새 연결을 섞은 부하에서
  *   연결별 응답 정확성과 서버 생존·AddressSanitizer 보고 없음으로 본다.
@@ -7,6 +8,9 @@
 #define _GNU_SOURCE /* accept4 */
 
 #include "../src/server_loop.h"
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -26,6 +30,7 @@
 static int failures;
 static char tmp[256], root[PATH_MAX], sock_path[PATH_MAX], log_path[PATH_MAX]; /* tmp는 mkdtemp의 짧은 경로 */
 static const char index_body[] = "<h1>loop</h1>\n";
+static route_table *loop_routes; /* NULL이면 -c 생략(Step 5와 같음) */
 
 /* ---- accept4 주입: 성공 after_success번 뒤 fail_count번 ECONNABORTED(D-07 재시도 오류) ---- */
 static long wrap_after_success = -1; /* -1이면 주입 없음 */
@@ -121,7 +126,7 @@ static pid_t start_server(void)
         }
         close(log_fd);
         alarm(30);
-        server_loop_run(fd, root, error, sizeof(error));
+        server_loop_run(fd, root, loop_routes, error, sizeof(error));
         fprintf(stderr, "루프 끝: %s\n", error);
         _exit(1);
     }
@@ -358,16 +363,237 @@ static void test_accept_retry_errors(void)
     wrap_after_success = -1;
 }
 
+/* ---- Step 6: 루프 수준 프록시 ---- */
+
+/* 127.0.0.1의 빈 포트에 듣는 TCP 소켓. 포트를 돌려준다. */
+static int tcp_listen(int *port_out)
+{
+    struct sockaddr_in a;
+    socklen_t len = sizeof(a);
+    int fd = socket(AF_INET, SOCK_STREAM, 0), one = 1;
+
+    setup_or_die(fd >= 0, "socket");
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    setup_or_die(bind(fd, (struct sockaddr *)&a, sizeof(a)) == 0 && listen(fd, 64) == 0, "bind/listen");
+    setup_or_die(getsockname(fd, (struct sockaddr *)&a, &len) == 0, "getsockname");
+    *port_out = ntohs(a.sin_port);
+    return fd;
+}
+
+/* 요청마다 "<id>:<경로>"로 답하고 닫는 HTTP/1.0 백엔드(자식). 요청 머리 끝까지만 읽는다. */
+static pid_t start_backend(char id, int *port)
+{
+    int fd = tcp_listen(port);
+    pid_t pid;
+
+    fflush(stdout);
+    pid = fork();
+    setup_or_die(pid >= 0, "fork");
+    if (pid == 0) {
+        alarm(60);
+        for (;;) {
+            char req[8192], body[600], resp[800];
+            size_t have = 0;
+            int c = accept(fd, NULL, NULL), n;
+            char *sp, *sp2;
+            if (c < 0) {
+                continue;
+            }
+            while (have < sizeof(req) - 1) {
+                ssize_t r = read(c, req + have, sizeof(req) - 1 - have);
+                if (r <= 0) {
+                    break;
+                }
+                have += (size_t)r;
+                req[have] = '\0';
+                if (strstr(req, "\r\n\r\n") != NULL) {
+                    break;
+                }
+            }
+            req[have] = '\0';
+            sp = strchr(req, ' ');
+            sp2 = sp != NULL ? strchr(sp + 1, ' ') : NULL;
+            n = snprintf(body, sizeof(body), "%c:%.*s", id, sp2 != NULL ? (int)(sp2 - sp - 1) : 0, sp != NULL ? sp + 1 : "");
+            n = snprintf(resp, sizeof(resp), "HTTP/1.0 200 OK\r\nContent-Length: %d\r\n\r\n%s", n, body);
+            if (write(c, resp, (size_t)n) < 0) {
+                /* 시험 백엔드: 쓰기 실패는 무시한다 */
+            }
+            close(c);
+        }
+    }
+    close(fd);
+    return pid;
+}
+
+static void set_routes(const char *text)
+{
+    static route_table table;
+    char error[256];
+    setup_or_die(route_parse(text, strlen(text), &table, error, sizeof(error)) == 0 &&
+                     route_resolve(&table, error, sizeof(error)) == 0,
+                 error);
+    loop_routes = &table;
+}
+
+/* 길이 있는 응답 하나를 읽어 본문을 body에 둔다. 상태 줄 첫 12바이트("HTTP/1.1 200")를 status에 둔다. 실패면 -1. */
+static int read_response(int fd, char *status, char *body, size_t cap)
+{
+    static char buf[16384];
+    static size_t have;
+    static int last_fd = -1;
+    char *end, *cl;
+    size_t head, len;
+
+    if (fd != last_fd) {
+        have = 0;
+        last_fd = fd;
+    }
+    for (;;) {
+        buf[have] = '\0';
+        end = strstr(buf, "\r\n\r\n");
+        if (end != NULL) {
+            cl = strstr(buf, "Content-Length: ");
+            head = (size_t)(end + 4 - buf);
+            len = cl != NULL && cl < end ? strtoul(cl + 16, NULL, 10) : 0;
+            if (have >= head + len) {
+                memcpy(status, buf, 12);
+                status[12] = '\0';
+                snprintf(body, cap, "%.*s", (int)len, buf + head);
+                memmove(buf, buf + head + len, have - head - len);
+                have -= head + len;
+                return 0;
+            }
+        }
+        {
+            ssize_t n = read(fd, buf + have, sizeof(buf) - 1 - have);
+            if (n <= 0) {
+                return -1;
+            }
+            have += (size_t)n;
+        }
+    }
+}
+
+static double seconds_since(const struct timespec *t0)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)(t.tv_sec - t0->tv_sec) + (double)(t.tv_nsec - t0->tv_nsec) / 1e9;
+}
+
+/* 같은 연결의 /api/ 요청이 두 백엔드에 번갈아 가고, 정적 요청과 섞여도 응답이 정확하다(요청마다 새 백엔드 소켓). */
+static void test_proxy_round_robin_and_churn(void)
+{
+    enum { CLIENTS = 30, ROUNDS = 5 };
+    int pa, pb, i, r, ok = 0, seq_ok;
+    pid_t ba = start_backend('A', &pa), bb = start_backend('B', &pb), pid;
+    char text[128], status[16], body[256], seq[64] = "";
+    int fds[CLIENTS];
+
+    snprintf(text, sizeof(text), "route /api/ 127.0.0.1:%d 127.0.0.1:%d\n", pa, pb);
+    set_routes(text);
+    pid = start_server();
+    fds[0] = dial();
+    for (i = 0; i < 4; i++) {
+        write_all(fds[0], "GET /api/x?q=1 HTTP/1.1\r\nHost: x\r\n\r\n");
+        if (read_response(fds[0], status, body, sizeof(body)) == 0) {
+            strcat(seq, body);
+            strcat(seq, " ");
+        }
+    }
+    close(fds[0]);
+    seq_ok = strcmp(seq, "A:/x?q=1 B:/x?q=1 A:/x?q=1 B:/x?q=1 ") == 0;
+    check("TC-6-01 루프: 한 연결의 /api/ 요청이 두 백엔드에 번갈아 감(접두 /api/ → /)", seq_ok, seq);
+    for (i = 0; i < CLIENTS; i++) {
+        fds[i] = dial();
+    }
+    for (r = 0; r < ROUNDS; r++) {
+        for (i = 0; i < CLIENTS; i++) {
+            write_all(fds[i], "GET /api/k HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n");
+        }
+        for (i = 0; i < CLIENTS; i++) {
+            char s2[16], b2[256];
+            ok += read_response(fds[i], status, body, sizeof(body)) == 0 && strcmp(status, "HTTP/1.1 200") == 0 &&
+                  (strcmp(body, "A:/k") == 0 || strcmp(body, "B:/k") == 0) &&
+                  read_response(fds[i], s2, b2, sizeof(b2)) == 0 && strcmp(b2, index_body) == 0;
+        }
+    }
+    for (i = 0; i < CLIENTS; i++) {
+        close(fds[i]);
+    }
+    check("TC-6-13 루프: 30연결 × 5회 프록시+정적 파이프라인(백엔드 소켓 150개 교체) 모두 정확", ok == CLIENTS * ROUNDS,
+          "응답이 섞이거나 빠졌다");
+    stop_server("TC-6-13 프록시 부하", pid);
+    kill(ba, SIGKILL);
+    kill(bb, SIGKILL);
+    waitpid(ba, NULL, 0);
+    waitpid(bb, NULL, 0);
+}
+
+/* 응답하지 않는 백엔드(accept도 안 함)로 가는 요청은 5초 뒤 504, 그동안 다른 연결의 정적 요청은 바로 응답한다. 닫힌 포트는 502. */
+static void test_proxy_504_502_concurrent(void)
+{
+    int silent_port, closed_port, silent = tcp_listen(&silent_port), closed = tcp_listen(&closed_port);
+    char text[160], status[16], body[256];
+    struct timespec t0;
+    double static_s, timeout_s;
+    pid_t pid;
+    int a, b;
+
+    close(closed); /* 이 포트는 이제 닫혀 있다(거부) */
+    snprintf(text, sizeof(text), "route /slow/ 127.0.0.1:%d\nroute /down/ 127.0.0.1:%d\n", silent_port, closed_port);
+    set_routes(text);
+    pid = start_server();
+    a = dial();
+    b = dial();
+    {
+        struct timeval tv = {8, 0};
+        setsockopt(a, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    write_all(a, "GET /slow/x HTTP/1.1\r\nHost: x\r\n\r\n");
+    write_all(b, "GET /down/x HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    check("TC-6-02 루프: 닫힌 백엔드 → 502", read_response(b, status, body, sizeof(body)) == 0 &&
+                                                strcmp(status, "HTTP/1.1 502") == 0,
+          status);
+    check("TC-6-04 루프: 504 대기 중 다른 연결의 정적 요청 바로 응답",
+          read_response(b, status, body, sizeof(body)) == 0 && strcmp(body, index_body) == 0 &&
+              (static_s = seconds_since(&t0)) < 1.0,
+          body);
+    check("TC-6-03 루프: 무응답 백엔드 → 504", read_response(a, status, body, sizeof(body)) == 0 &&
+                                                 strcmp(status, "HTTP/1.1 504") == 0,
+          status);
+    timeout_s = seconds_since(&t0);
+    {
+        char label[160];
+        snprintf(label, sizeof(label), "TC-6-03 루프: 504는 약 5초 뒤(%.2f초, 정적은 %.3f초)", timeout_s, static_s);
+        check(label, timeout_s >= 4.9 && timeout_s < 6.5, "시간 범위 밖");
+    }
+    write_all(a, "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    check("TC-6-11 루프: 504 뒤 같은 연결 유지, 다음 정적 요청 200",
+          read_response(a, status, body, sizeof(body)) == 0 && strcmp(body, index_body) == 0, body);
+    close(a);
+    close(b);
+    close(silent);
+    stop_server("TC-6-13 504·502", pid);
+}
+
 int main(void)
 {
     alarm(60);
     signal(SIGPIPE, SIG_IGN); /* D-05: 서버와 같은 조건 */
-    printf("test_server_loop (TC-5-11)\n");
+    printf("test_server_loop (TC-5-11, TC-6-13 루프 범위)\n");
     build_root();
     test_hup_with_pending_input();
     test_many_ready();
     test_finish_and_reuse();
     test_accept_retry_errors();
+    test_proxy_round_robin_and_churn();
+    test_proxy_504_502_concurrent();
+    loop_routes = NULL;
     remove_root();
 
     if (failures > 0) {

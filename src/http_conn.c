@@ -21,11 +21,16 @@ enum {
     ST_DISCARD,    /* 버릴 본문 읽기, 다 읽으면 응답 */
     ST_FILE,       /* 파일 조각 채우기 */
     ST_RESPONDED,  /* 응답 출력을 다 보냄: 유지·닫기·정리 판단 */
-    ST_DRAIN       /* 닫기 전 정리(D-54) */
+    ST_DRAIN,      /* 닫기 전 정리(D-54) */
+    ST_PX_CONNECT, /* 백엔드 연결 완료 대기(EINPROGRESS, D-67) */
+    ST_PX_UPLOAD,  /* 요청 머리·본문을 백엔드로 보내며 조기 응답을 지켜봄(D-64, D-66) */
+    ST_PX_HEAD,    /* 응답 머리 받기 */
+    ST_PX_BODY,    /* 커밋 뒤 본문 중계(D-65) */
+    ST_PX_SKIP     /* 남은 요청 본문 버리기 → 저장한 502·504 또는 유지·닫기 판단(D-66) */
 };
 
-/* 기다리는 종류(D-59 표의 행). 만료 결과가 이것으로 정해진다. */
-enum { WAIT_IDLE, WAIT_READ, WAIT_WRITE, WAIT_DRAIN };
+/* 기다리는 종류(D-59·D-67 표의 행). 만료 결과가 이것으로 정해진다. */
+enum { WAIT_IDLE, WAIT_READ, WAIT_WRITE, WAIT_DRAIN, WAIT_BE_CONNECT, WAIT_BE_WRITE, WAIT_BE_READ };
 
 #define CONTINUE (-1) /* 처리 함수가 같은 차례 안에서 계속하라는 값. 그 밖은 http_conn_step */
 
@@ -34,6 +39,8 @@ typedef struct {
     int did_read;     /* 소켓 read 1번 */
     int did_fill;     /* 파일 조각 1번 */
     size_t may_write; /* 차례를 시작할 때 있던 출력 바이트 */
+    int did_be_write; /* 백엔드 write 1번(D-67) */
+    int wake;         /* 깨운 원인(HTTP_CONN_WAKE_*). 연결 완료 판정에 한 번 쓴다 */
 } turn;
 
 typedef int (*state_fn)(http_conn *c, turn *t, long long now);
@@ -213,11 +220,17 @@ static int on_head(http_conn *c, turn *t, long long now)
 }
 
 /* 본문 단계 시작. /echo만 머리 + 버퍼 속 본문을 먼저 채운다(D-39, D-50). 그 밖은 본문을 버린 뒤 응답한다. */
+static int px_start(http_conn *c, route_rule *rule, long long now);
+
 static int on_body_start(http_conn *c, turn *t, long long now)
 {
     size_t used = c->req.head_len + c->body_buffered;
+    route_rule *rule = route_match(c->routes, c->req.target);
 
     (void)t;
+    if (rule != NULL) { /* D-62: 규칙 매칭이 /echo·405·정적 판정보다 먼저다 */
+        return px_start(c, rule, now);
+    }
     if (c->echo) {
         http_response_extra extra = {NULL, NULL, c->conn_hdr};
         int n = http_response_format_head(c->out, sizeof(c->out), 200, "application/octet-stream",
@@ -380,12 +393,321 @@ static int on_drain(http_conn *c, turn *t, long long now)
     return finish(c, HTTP_CONN_DONE, 0); /* 상대가 닫음, ECONNRESET 등 모든 읽기 오류 */
 }
 
-static const state_fn handlers[] = {on_head, on_body_start, on_echo, on_discard, on_file, on_responded, on_drain};
+/* ---- Step 6 프록시(D-64~D-67) ---- */
 
-void http_conn_init(http_conn *c, int fd, const char *root, long long now)
+/* 프록시 대기에 들어간다. 대기 종류가 바뀌면 그때부터 새 마감을 잡는다(D-67). 같은 종류면 마감을 늘리지 않는다. */
+static int wait_px(http_conn *c, int kind, long long now)
+{
+    if (c->wait != kind) {
+        c->wait = kind;
+        c->deadline = now + HTTP_CONN_TIMEOUT_NS;
+    }
+    switch (kind) {
+    case WAIT_BE_CONNECT:
+    case WAIT_BE_WRITE: return HTTP_CONN_WANT_BACKEND_WRITE;
+    case WAIT_BE_READ: return HTTP_CONN_WANT_BACKEND_READ;
+    default: return HTTP_CONN_WANT_READ;
+    }
+}
+
+/* 백엔드 소켓을 닫는다. close가 epoll 등록도 지운다(dup 없음). 세대가 바뀌어 옛 알림이 걸러진다. */
+static void close_backend(http_conn *c)
+{
+    if (c->be_fd >= 0) {
+        close(c->be_fd);
+        c->be_fd = -1;
+        c->be_gen++;
+    }
+    c->uploading = 0;
+    c->be_out_pos = c->be_out_len = 0; /* 미송신 바이트는 버린다(이미 받은 본문으로 센다, D-66) */
+}
+
+/* D-66: 커밋 전 실패. 백엔드를 닫고, 남은 본문을 다 버린 뒤 status를 보낸다. */
+static int px_fail(http_conn *c, int status)
+{
+    close_backend(c);
+    c->pending_status = status;
+    c->state = ST_PX_SKIP;
+    return CONTINUE;
+}
+
+static void start_upload(http_conn *c)
+{
+    c->uploading = 1;
+    c->state = ST_PX_UPLOAD;
+}
+
+/* 규칙에 맞는 요청: 백엔드를 고르고(D-63) 요청 머리 + 버퍼 속 본문을 백엔드 버퍼에 만든 뒤 논블로킹 connect(D-64). */
+static int px_start(http_conn *c, route_rule *rule, long long now)
+{
+    const route_backend *b = route_pick(rule);
+    size_t used = c->req.head_len + c->body_buffered;
+    int n = proxy_format_request(c->be_out, sizeof(c->be_out), &c->req, route_forward_target(rule, c->req.target),
+                                 b->authority);
+
+    if (n < 0 || (size_t)n + c->body_buffered > sizeof(c->be_out)) {
+        return finish(c, HTTP_CONN_ERROR, EINVAL); /* 16KB는 머리 8KB + 덧붙이는 머리보다 크다(D-67): 오지 않는 경로 */
+    }
+    memcpy(c->be_out + n, c->in + c->req.head_len, c->body_buffered);
+    c->be_out_pos = 0;
+    c->be_out_len = (size_t)n + c->body_buffered;
+    consume(c, used); /* 본문 뒤 다음 요청 바이트는 남긴다(D-47) */
+    c->be_in_len = 0;
+    c->committed = 0;
+    c->pending_status = 0;
+    c->be_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (c->be_fd < 0) {
+        return px_fail(c, 502);
+    }
+    c->be_gen++;
+    if (connect(c->be_fd, (const struct sockaddr *)&b->addr, sizeof(b->addr)) == 0) {
+        start_upload(c);
+        return CONTINUE;
+    }
+    if (errno != EINPROGRESS) {
+        return px_fail(c, 502);
+    }
+    c->state = ST_PX_CONNECT;
+    c->wait = WAIT_BE_CONNECT;
+    c->deadline = now + HTTP_CONN_TIMEOUT_NS; /* 연결 대기는 시작부터 5초 고정 */
+    return HTTP_CONN_WANT_BACKEND_WRITE;
+}
+
+/* 연결 완료는 현재 백엔드의 쓰기 준비·ERR 알림을 받은 차례에만 SO_ERROR로 판정한다(D-67). */
+static int on_px_connect(http_conn *c, turn *t, long long now)
+{
+    int err = 0;
+    socklen_t len = sizeof(err);
+
+    if (!(t->wake & (HTTP_CONN_WAKE_BACKEND_OUT | HTTP_CONN_WAKE_BACKEND_ERR))) {
+        return wait_px(c, WAIT_BE_CONNECT, now);
+    }
+    t->wake = 0;
+    if (getsockopt(c->be_fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0) {
+        return px_fail(c, 502);
+    }
+    start_upload(c);
+    return CONTINUE;
+}
+
+/* D-65 커밋: 다시 쓴 머리와 미리 받은 본문(길이까지)을 출력 버퍼에 채운다. 그 뒤에는 502·504로 바꾸지 않는다. */
+static int px_commit(http_conn *c, const proxy_response *resp, long long now)
+{
+    int keep = resp->body != PROXY_BODY_EOF && c->close_after == 0;
+    size_t extra = c->be_in_len - resp->head_len;
+    int n;
+
+    if (!keep) {
+        c->close_after = 1;
+    }
+    n = proxy_format_response_head(c->out, sizeof(c->out), c->be_in, resp, keep ? c->conn_hdr : HTTP_CONNECTION_CLOSE);
+    if (n < 0) {
+        return finish(c, HTTP_CONN_ERROR, errno); /* 머리 8KB → 출력 64KB: 오지 않는 경로 */
+    }
+    c->resp_body = resp->body;
+    c->resp_left = 0;
+    if (resp->body == PROXY_BODY_NONE) {
+        extra = 0; /* 204·304 뒤 바이트는 내보내지 않는다 */
+    } else if (resp->body == PROXY_BODY_LENGTH) {
+        if (extra > resp->content_length) {
+            extra = resp->content_length; /* 넘는 바이트는 버린다 */
+        }
+        c->resp_left = resp->content_length - extra;
+    }
+    memcpy(c->out + n, c->be_in + resp->head_len, extra);
+    filled(c, (size_t)n + extra, now);
+    c->committed = 1;
+    c->uploading = 0;
+    c->be_out_pos = c->be_out_len = 0; /* 조기 응답: 미송신 바이트 버림(D-66) */
+    c->be_in_len = 0;
+    if (resp->body == PROXY_BODY_NONE || (resp->body == PROXY_BODY_LENGTH && c->resp_left == 0)) {
+        close_backend(c); /* 응답 끝: 백엔드 EOF를 기다리지 않는다 */
+    }
+    c->state = ST_PX_BODY;
+    return CONTINUE;
+}
+
+#define NOTHING (-2) /* 응답 머리가 아직 완성되지 않음 */
+
+/* 백엔드에서 응답 머리를 한 번 읽는다(소켓 read 예산 1번). 완성·실패면 상태를 바꾸고 CONTINUE. */
+static int read_head(http_conn *c, turn *t, long long now)
+{
+    proxy_response resp;
+    ssize_t n;
+
+    t->did_read = 1;
+    n = read(c->be_fd, c->be_in + c->be_in_len, sizeof(c->be_in) - c->be_in_len);
+    if (n > 0) {
+        c->be_in_len += (size_t)n;
+        if (!c->uploading) {
+            c->deadline = now + HTTP_CONN_TIMEOUT_NS; /* 응답 머리 대기는 읽기 진행으로 잰다 */
+        }
+        switch (proxy_parse_response(c->be_in, c->be_in_len, &resp)) {
+        case PROXY_PARSE_OK: return px_commit(c, &resp, now);
+        case PROXY_PARSE_BAD: return px_fail(c, 502);
+        default: return NOTHING;
+        }
+    }
+    if (n < 0 && would_block(errno)) {
+        return NOTHING;
+    }
+    return px_fail(c, 502); /* 머리 없이 EOF·읽기 오류(D-66) */
+}
+
+/*
+ * 업로드: 백엔드 알림이면 먼저 응답(조기 응답)을 읽고, 백엔드 버퍼를 보내고, 비면 클라이언트 본문을 남은 길이만큼 읽는다.
+ * 쓰기 실패는 업로드를 멈추고 응답 머리를 기다린다(D-66, D-67).
+ */
+static int on_px_upload(http_conn *c, turn *t, long long now)
+{
+    ssize_t n;
+
+    if ((t->wake & (HTTP_CONN_WAKE_BACKEND_IN | HTTP_CONN_WAKE_BACKEND_ERR)) && !t->did_read) {
+        int r;
+        t->wake = 0;
+        r = read_head(c, t, now);
+        if (r != NOTHING) {
+            return r;
+        }
+    }
+    if (c->be_out_pos < c->be_out_len) {
+        if (t->did_be_write) {
+            return wait_px(c, WAIT_BE_WRITE, now);
+        }
+        t->did_be_write = 1;
+        n = write(c->be_fd, c->be_out + c->be_out_pos, c->be_out_len - c->be_out_pos);
+        if (n > 0) {
+            c->be_out_pos += (size_t)n;
+            c->deadline = now + HTTP_CONN_TIMEOUT_NS;
+            return CONTINUE;
+        }
+        if (n < 0 && would_block(errno)) {
+            return wait_px(c, WAIT_BE_WRITE, now);
+        }
+        c->uploading = 0; /* EPIPE·ECONNRESET 등: 업로드를 멈추고 응답을 기다린다 */
+        c->be_out_pos = c->be_out_len = 0;
+        c->state = ST_PX_HEAD;
+        return CONTINUE;
+    }
+    c->be_out_pos = c->be_out_len = 0;
+    if (c->body_left == 0) {
+        c->uploading = 0;
+        c->state = ST_PX_HEAD;
+        return CONTINUE;
+    }
+    if (t->did_read) {
+        return wait_px(c, WAIT_READ, now);
+    }
+    t->did_read = 1;
+    n = read(c->fd, c->be_out, c->body_left < sizeof(c->be_out) ? c->body_left : sizeof(c->be_out));
+    if (n > 0) {
+        c->be_out_len = (size_t)n;
+        c->body_left -= (size_t)n;
+        c->deadline = now + HTTP_CONN_TIMEOUT_NS;
+        return CONTINUE;
+    }
+    if (n < 0 && would_block(errno)) {
+        return wait_px(c, WAIT_READ, now);
+    }
+    return mid_request_failure(c, n);
+}
+
+static int on_px_head(http_conn *c, turn *t, long long now)
+{
+    int r;
+
+    if (t->did_read) {
+        return wait_px(c, WAIT_BE_READ, now);
+    }
+    r = read_head(c, t, now);
+    return r == NOTHING ? wait_px(c, WAIT_BE_READ, now) : r;
+}
+
+/* 커밋 뒤 본문 조각: 길이 있는 응답은 남은 길이보다 더 읽지 않는다. 길이 전 EOF·오류는 응답 없이 닫는다(D-65, D-66). */
+static int on_px_body(http_conn *c, turn *t, long long now)
+{
+    size_t want = sizeof(c->out);
+    ssize_t n;
+
+    if (c->be_fd < 0) { /* 응답 끝 */
+        c->state = ST_PX_SKIP;
+        return CONTINUE;
+    }
+    if (t->did_read) {
+        return wait_px(c, WAIT_BE_READ, now);
+    }
+    t->did_read = 1;
+    if (c->resp_body == PROXY_BODY_LENGTH && c->resp_left < want) {
+        want = c->resp_left;
+    }
+    n = read(c->be_fd, c->out, want);
+    if (n > 0) {
+        if (c->resp_body == PROXY_BODY_LENGTH) {
+            c->resp_left -= (size_t)n;
+            if (c->resp_left == 0) {
+                close_backend(c);
+            }
+        }
+        filled(c, (size_t)n, now);
+        return CONTINUE;
+    }
+    if (n < 0 && would_block(errno)) {
+        return wait_px(c, WAIT_BE_READ, now);
+    }
+    if (n == 0 && c->resp_body == PROXY_BODY_EOF) {
+        close_backend(c); /* 길이 없는 응답의 정상 끝 */
+        return CONTINUE;
+    }
+    return finish(c, HTTP_CONN_ERROR, EIO);
+}
+
+/* 남은 요청 본문을 버린다(이미 받은 본문은 다시 읽지 않는다, D-66). 다 버리면 저장한 502·504 또는 유지·닫기 판단. */
+static int on_px_skip(http_conn *c, turn *t, long long now)
+{
+    ssize_t n;
+
+    if (c->body_left > 0 && c->pending_status == 0 && c->close_after != 0) {
+        c->state = ST_RESPONDED; /* 닫기 규칙이면 남은 본문을 버리지 않고 닫는다 */
+        return CONTINUE;
+    }
+    if (c->body_left == 0) {
+        if (c->pending_status != 0) {
+            http_response_extra extra = {NULL, NULL, c->conn_hdr};
+            int status = c->pending_status;
+            c->pending_status = 0;
+            return fill_status(c, status, &extra, now);
+        }
+        c->state = ST_RESPONDED;
+        return CONTINUE;
+    }
+    if (t->did_read) {
+        return wait_px(c, WAIT_READ, now);
+    }
+    t->did_read = 1;
+    n = read(c->fd, c->in, c->body_left < sizeof(c->in) ? c->body_left : sizeof(c->in));
+    if (n > 0) {
+        c->body_left -= (size_t)n;
+        c->deadline = now + HTTP_CONN_TIMEOUT_NS;
+        return CONTINUE;
+    }
+    if (n < 0 && would_block(errno)) {
+        return wait_px(c, WAIT_READ, now);
+    }
+    return mid_request_failure(c, n);
+}
+
+static const state_fn handlers[] = {on_head,   on_body_start, on_echo,      on_discard, on_file,   on_responded,
+                                    on_drain,  on_px_connect, on_px_upload, on_px_head, on_px_body, on_px_skip};
+
+void http_conn_init(http_conn *c, int fd, const char *root, route_table *routes, long long now)
 {
     c->fd = fd;
     c->root = root;
+    c->routes = routes;
+    c->be_fd = -1;
+    c->be_gen = 0;
+    c->uploading = c->committed = c->pending_status = 0;
+    c->be_out_pos = c->be_out_len = c->be_in_len = 0;
     c->state = ST_HEAD;
     c->wait = WAIT_IDLE;
     c->deadline = now + HTTP_CONN_TIMEOUT_NS;
@@ -399,9 +721,9 @@ void http_conn_init(http_conn *c, int fd, const char *root, long long now)
     c->out_pos = c->out_len = 0;
 }
 
-http_conn_step http_conn_run(http_conn *c, long long now)
+http_conn_step http_conn_run(http_conn *c, int wake, long long now)
 {
-    turn t = {0, 0, c->out_len - c->out_pos};
+    turn t = {0, 0, c->out_len - c->out_pos, 0, wake};
 
     for (;;) {
         int r = c->out_pos < c->out_len ? flush(c, &t, now) : handlers[c->state](c, &t, now);
@@ -416,12 +738,21 @@ int http_conn_expired(const http_conn *c, long long now)
     return now >= c->deadline;
 }
 
-void http_conn_expire(http_conn *c)
+http_conn_step http_conn_expire(http_conn *c)
 {
     switch (c->wait) {
-    case WAIT_READ: finish(c, HTTP_CONN_TIMED_OUT, EAGAIN); break;
-    case WAIT_WRITE: finish(c, HTTP_CONN_ERROR, EAGAIN); break;
-    default: finish(c, HTTP_CONN_DONE, 0); break; /* 요청 사이·정리 */
+    case WAIT_READ: return (http_conn_step)finish(c, HTTP_CONN_TIMED_OUT, EAGAIN);
+    case WAIT_WRITE: return (http_conn_step)finish(c, HTTP_CONN_ERROR, EAGAIN);
+    case WAIT_BE_READ:
+        if (c->committed) {
+            return (http_conn_step)finish(c, HTTP_CONN_ERROR, ETIMEDOUT); /* 커밋 뒤: 응답 없이 닫기 */
+        }
+        /* fall through - 커밋 전 백엔드 만료는 504 */
+    case WAIT_BE_CONNECT:
+    case WAIT_BE_WRITE:
+        px_fail(c, 504);
+        return HTTP_CONN_RUNNABLE; /* D-67: 루프는 끝으로 보지 않고 내부 실행 목록에 넣는다 */
+    default: return (http_conn_step)finish(c, HTTP_CONN_DONE, 0); /* 요청 사이·정리 */
     }
 }
 
@@ -431,4 +762,5 @@ void http_conn_release(http_conn *c)
         close(c->file_fd);
         c->file_fd = -1;
     }
+    close_backend(c);
 }

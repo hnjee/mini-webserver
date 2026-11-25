@@ -155,7 +155,7 @@ static http_conn_result drive(int fd, const char *root_dir)
 
     setup_or_die(c != NULL, "malloc");
     set_nonblocking(fd);
-    http_conn_init(c, fd, root_dir, now_ns());
+    http_conn_init(c, fd, root_dir, NULL, now_ns());
     for (;;) {
         struct pollfd pfd;
         long long left = c->deadline - now_ns();
@@ -168,7 +168,7 @@ static http_conn_result drive(int fd, const char *root_dir)
         setup_or_die(n >= 0 || errno == EINTR, "poll");
         if (n > 0) {
             do {
-                step = http_conn_run(c, now_ns());
+                step = http_conn_run(c, HTTP_CONN_WAKE_CLIENT, now_ns());
             } while (step == HTTP_CONN_RUNNABLE);
             if (step == HTTP_CONN_FINISHED) {
                 break;
@@ -1007,7 +1007,7 @@ static direct direct_open(long long now)
     set_nonblocking(d.server);
     d.c = malloc(sizeof(*d.c));
     setup_or_die(d.c != NULL, "malloc");
-    http_conn_init(d.c, d.server, root, now);
+    http_conn_init(d.c, d.server, root, NULL, now);
     return d;
 }
 
@@ -1029,7 +1029,7 @@ static http_conn_step run_ready(http_conn *c, long long now, int max)
 
     for (i = 0; i < max; i++) {
         struct pollfd pfd = {c->fd, POLLOUT, 0};
-        step = http_conn_run(c, now);
+        step = http_conn_run(c, HTTP_CONN_WAKE_CLIENT, now);
         if (step == HTTP_CONN_RUNNABLE) {
             continue;
         }
@@ -1146,8 +1146,8 @@ static void deadline_slow_body_after_continue(void)
     int i, early = 0;
 
     write_all(d.client, S("POST /x HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 10\r\n\r\n"));
-    step = http_conn_run(d.c, 0); /* 머리를 읽고 100을 채운다(RUNNABLE) */
-    step = http_conn_run(d.c, 1 * SEC); /* 100을 다 보낸 때 = 1초 */
+    step = http_conn_run(d.c, HTTP_CONN_WAKE_CLIENT, 0); /* 머리를 읽고 100을 채운다(RUNNABLE) */
+    step = http_conn_run(d.c, HTTP_CONN_WAKE_CLIENT, 1 * SEC); /* 100을 다 보낸 때 = 1초 */
     have = read_available(d.client, reply, sizeof(reply));
     check("TC-5-10 100 뒤: 100만 나가고 본문 읽기 대기", step == HTTP_CONN_WANT_READ && have == 25 &&
                                                        memcmp(reply, "HTTP/1.1 100 Continue\r\n\r\n", 25) == 0,
@@ -1220,7 +1220,7 @@ static void deadline_echo_input_stalled(void)
     check("TC-5-10 /echo 입력 끊김: 머리+abc 보낸 뒤 읽기 대기", step == HTTP_CONN_WANT_READ &&
                                                                find_in(reply, have, "\r\n\r\nabc") + 7 == have,
           "다르다");
-    step = http_conn_run(d.c, 3 * SEC); /* 진행 없는 차례(EAGAIN) */
+    step = http_conn_run(d.c, HTTP_CONN_WAKE_CLIENT, 3 * SEC); /* 진행 없는 차례(EAGAIN) */
     check("TC-5-10 /echo 입력 끊김: 진행 없는 차례 뒤에도 기존 마감(5초) 유지",
           step == HTTP_CONN_WANT_READ && !expire_if_due(d.c, 5 * SEC - 1) && expire_if_due(d.c, 5 * SEC) &&
               d.c->result == HTTP_CONN_TIMED_OUT,
@@ -1243,7 +1243,7 @@ static void deadline_partial_write_bytes(void)
     write_all(d.client, S("GET /big.bin HTTP/1.1\r\nHost: x\r\n\r\n"));
     for (i = 0; i < 100000 && (have == 0 || response_len(reply, have) == 0); i++) {
         ssize_t n;
-        step = http_conn_run(d.c, 0);
+        step = http_conn_run(d.c, HTTP_CONN_WAKE_CLIENT, 0);
         if (step == HTTP_CONN_WANT_WRITE && d.c->out_pos > 0 && d.c->out_pos < d.c->out_len) {
             partial = 1;
         }
@@ -1285,7 +1285,7 @@ static void deadline_ready_at_boundary(void)
     d = direct_open(0);
     write_all(d.client, S("GET / HT"));
     (void)run_ready(d.c, 0, 10);
-    step = http_conn_run(d.c, 6 * SEC); /* 준비 알림만 있고 바이트 없음 */
+    step = http_conn_run(d.c, HTTP_CONN_WAKE_CLIENT, 6 * SEC); /* 준비 알림만 있고 바이트 없음 */
     check("TC-5-10 경계 미진행: 진행 없으면 마감 확인에서 TIMED_OUT",
           step == HTTP_CONN_WANT_READ && expire_if_due(d.c, 6 * SEC) && d.c->result == HTTP_CONN_TIMED_OUT, "다르다");
     direct_close(&d);
@@ -1300,7 +1300,7 @@ static void deadline_ready_at_boundary(void)
           starts_with(reply, "HTTP/1.1 413 ") && step == HTTP_CONN_WANT_READ, "다르다");
     check("TC-5-10 정리: 읽어도 마감은 고정(5초)", http_conn_expired(d.c, 5 * SEC), "정리 마감이 늘었다");
     write_all(d.client, "2", 1);
-    step = http_conn_run(d.c, 6 * SEC);
+    step = http_conn_run(d.c, HTTP_CONN_WAKE_CLIENT, 6 * SEC);
     setup_or_die(ioctl(d.server, FIONREAD, &avail) == 0, "FIONREAD");
     check("TC-5-10 정리: 마감 뒤 준비돼도 새로 읽지 않고 DONE",
           step == HTTP_CONN_FINISHED && d.c->result == HTTP_CONN_DONE && avail == 1, "마감 뒤에 읽었다");

@@ -40,10 +40,20 @@ int main(void)
         check("루트 값", config.root != NULL && strcmp(config.root, ".") == 0, "루트가 다르다");
     }
     {
-        /* -c는 Step 6에서 추가한다. 지금은 알 수 없는 인자로 거부해야 한다. */
+        /* TC-6-06: -c는 선택 인자다(D-61). 파일 내용 검사는 main(route_load)이 한다. */
         char *argv[] = {"webserver", "-p", "8080", "-r", ".", "-c", "./routes.conf", NULL};
-        check("-c는 아직 받지 않는다",
-              run(argv, 7, &config, error, sizeof(error)) == OPTIONS_ERROR, "허용됐다");
+        status = run(argv, 7, &config, error, sizeof(error));
+        check("TC-6-06 -c 받음", status == OPTIONS_OK && config.config != NULL &&
+                                   strcmp(config.config, "./routes.conf") == 0, error);
+    }
+    {
+        char *argv[] = {"webserver", "-p", "8080", "-r", ".", NULL};
+        status = run(argv, 5, &config, error, sizeof(error));
+        check("TC-6-06 -c 생략이면 config NULL", status == OPTIONS_OK && config.config == NULL, "NULL이 아니다");
+    }
+    {
+        char *argv[] = {"webserver", "-p", "8080", "-r", ".", "-c", NULL};
+        check("TC-6-06 -c 값 없음 거부", run(argv, 6, &config, error, sizeof(error)) == OPTIONS_ERROR, "허용됐다");
     }
     {
         char *argv[] = {"webserver", "-p", "1", "-r", ".", NULL};

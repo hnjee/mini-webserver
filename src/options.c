@@ -60,9 +60,10 @@ void options_usage(void *stream, const char *program_name)
 {
     FILE *out = (FILE *)stream;
 
-    fprintf(out, "사용법: %s -p <포트> -r <루트 디렉터리>\n", program_name);
+    fprintf(out, "사용법: %s -p <포트> -r <루트 디렉터리> [-c <라우팅 설정 파일>]\n", program_name);
     fprintf(out, "  -p  서버가 열 포트 번호 (%d~%d)\n", PORT_MIN, PORT_MAX);
     fprintf(out, "  -r  정적 파일 루트 디렉터리 (존재해야 한다, Step 3부터 사용)\n");
+    fprintf(out, "  -c  리버스 프록시 규칙 파일 (줄마다 route <접두 경로> <호스트:포트>...)\n");
     fprintf(out, "  -h  이 도움말을 출력한다\n");
 }
 
@@ -74,6 +75,7 @@ options_status options_parse(int argc, char *const argv[], options *out,
 
     out->port = 0;
     out->root = NULL;
+    out->config = NULL;
     if (error_size > 0) {
         error[0] = '\0';
     }
@@ -82,13 +84,16 @@ options_status options_parse(int argc, char *const argv[], options *out,
        optind = 1로는 이전 호출의 잔여 문자가 남는다. 이 저장소는 Linux(glibc)만 지원한다. */
     optind = 0;
     opterr = 0;  /* getopt가 직접 메시지를 찍지 않게 한다 */
-    while ((option = getopt(argc, argv, ":p:r:h")) != -1) {
+    while ((option = getopt(argc, argv, ":p:r:c:h")) != -1) {
         switch (option) {
         case 'p':
             port_text = optarg;
             break;
         case 'r':
             out->root = optarg;
+            break;
+        case 'c':
+            out->config = optarg;
             break;
         case 'h':
             return OPTIONS_HELP;

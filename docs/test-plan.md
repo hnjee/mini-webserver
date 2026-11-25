@@ -37,7 +37,7 @@
 | [Step 3](./steps/step-3-static/README.md) | 19 | 기능, 단위 | 19 | 0 |
 | [Step 4](./steps/step-4-post-keepalive/README.md) | 36 | 기능, 단위 | 36 | 0 |
 | [Step 5](./steps/step-5-concurrency/README.md) | 11 | 기능, 부하, 단위, 회귀 | 11 | 0 |
-| [Step 6](./steps/step-6-reverse-proxy/README.md) | 5 | 기능, 단위, 회귀 | 0 | 0 |
+| [Step 6](./steps/step-6-reverse-proxy/README.md) | 14 | 기능, 단위, 회귀 | 14 (독립 검증) | 0 |
 | [Step 7](./steps/step-7-robustness/README.md) | 2 | 기능, 메모리 | 0 | 0 |
 | [Step 8](./steps/step-8-final/README.md) | 2 | 부하, 회귀 | 0 | 0 |
 

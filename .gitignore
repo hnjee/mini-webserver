@@ -17,6 +17,9 @@ AGENTS.md
 /tests/test_mime
 /tests/test_static_file
 /tests/test_server_loop
+/tests/test_route
+/tests/test_proxy
+/tests/test_proxy_conn
 /experiments/bind_no_reuse
 /.build-platform
 *.dSYM/

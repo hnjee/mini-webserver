@@ -7,6 +7,7 @@
 typedef struct {
     int port;         /* -p: 1~65535 */
     const char *root; /* -r: 존재하는 디렉터리 (Step 3부터 사용) */
+    const char *config; /* -c: 라우팅 설정 파일, 없으면 NULL(D-61). 내용 검사는 route_load */
 } options;
 
 typedef enum {
@@ -18,7 +19,7 @@ typedef enum {
 /*
  * argv를 파싱해 out에 채운다. 실패하면 error에 사람이 읽는 이유를 쓴다.
  * getopt를 쓰므로 호출할 때마다 glibc getopt 상태를 초기화한다(optind = 0, 반복 호출 가능).
- * 라우팅 설정 파일 인자(-c)는 Step 6에서 추가한다. 지금은 받지 않는다.
+ * -c(라우팅 설정 파일)는 선택 인자다(D-61).
  */
 options_status options_parse(int argc, char *const argv[], options *out,
                              char *error, size_t error_size);

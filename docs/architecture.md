@@ -20,7 +20,7 @@
 | 경로 탈출 방지 · 큰 파일 전송 | 문자열 검사 + `realpath` 접두 비교, 64KB 고정 버퍼 조각 전송 (구현 검증 통과) | [Step 3](./steps/step-3-static/decision.md) (D-21, D-22) |
 | 남은 바이트 처리 · 타임아웃 | 미정 | [Step 4](./steps/step-4-post-keepalive/decision.md) |
 | 동시성 방식 | I/O 멀티플렉싱·5초 무진행 정책 채택; `epoll` 등 내부 설계 구현은 영향 한정 독립 검증 통과 | [Step 5](./steps/step-5-concurrency/decision.md) (D-55~D-59) |
-| 라우팅 설정 형식 · 백엔드 연결 재사용 | 미정 | [Step 6](./steps/step-6-reverse-proxy/decision.md) |
+| 라우팅 설정 형식 · 백엔드 연결 재사용 | `-c` 선택 인자의 `route` 줄, 가장 긴 접두 경로·규칙별 라운드 로빈, 요청마다 새 연결(재사용 없음). 클라이언트 연결은 끝을 알면 유지, EOF 응답은 닫기. 검토 차단 해소·구현 전 | [Step 6](./steps/step-6-reverse-proxy/decision.md) (D-60~D-67) |
 | 종료 방식 | 미정 | [Step 7](./steps/step-7-robustness/decision.md) |
 
 ## 모듈 구성

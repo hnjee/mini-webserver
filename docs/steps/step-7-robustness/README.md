@@ -53,4 +53,4 @@
 
 ## 6. 막힌 것 / 다음 행동
 
-- 없음
+- Step 6에서 넘김: 시작 실패 경로(`route_load`·`listener_open`·루프 실패)에서 `main`이 `realpath` 결과를 해제하지 않아 LSan이 4097바이트를 보고한다. TC-7-02 전에 실패 반환 전 `free(root)`로 정리한다.

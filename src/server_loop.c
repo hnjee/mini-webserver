@@ -1,8 +1,9 @@
 #define _GNU_SOURCE /* accept4, accept(2)의 ENONET 등 Linux 오류 코드 */
 
 /*
- * D-56, D-57: epoll 레벨 트리거 루프. 연결 목록·내부 실행 목록·마감 확인·끝난 연결 정리를 맡고,
+ * D-56, D-57, D-67: epoll 레벨 트리거 루프. 연결 목록·내부 실행 목록·마감 확인·끝난 연결 정리·소켓 등록을 맡고,
  * 연결 하나의 상태 전이는 http_conn에 맡긴다. 한 회차 = 반환 배치 → 회차 시작 때 실행 목록 → 마감 확인 → 정리.
+ * 연결마다 지금 기다리는 소켓 하나만 등록하고, 업로드 중에만 백엔드 읽기를 함께 등록한다.
  */
 #include "server_loop.h"
 #include "http_conn.h"
@@ -21,13 +22,24 @@
 #define LOOP_MAX_EVENTS 64 /* epoll_wait 한 번에 받는 준비 알림 수 */
 #define LOOP_ACCEPT_MAX 64 /* 회차당 accept 시도 상한(성공·재시도 오류·준비 실패 모두 1번) */
 
+struct conn;
+
+/* epoll 알림이 가리키는 표: 어느 연결의 어느 소켓인가(D-67). 듣는 소켓은 NULL이다. */
+typedef struct {
+    struct conn *owner;
+    int backend; /* 0 클라이언트, 1 백엔드 */
+} tag;
+
 typedef struct conn {
     http_conn http;
     struct conn *prev, *next; /* 모든 연결(마감 확인) */
     struct conn *run_next;    /* 내부 실행 목록 */
     struct conn *done_next;   /* 이번 회차에 끝난 연결 */
-    unsigned interest;        /* epoll에 등록한 방향: EPOLLIN 또는 EPOLLOUT */
-    int waiting;              /* 마지막 차례가 WANT_READ·WANT_WRITE였다 */
+    tag client_tag, backend_tag;
+    unsigned client_events;   /* 클라이언트 소켓에 등록한 방향, 0이면 등록 안 됨 */
+    unsigned backend_events;  /* 백엔드 소켓에 등록한 방향, 0이면 등록 안 됨 */
+    unsigned backend_reg_gen; /* 등록한 백엔드 소켓의 세대 */
+    int waiting;              /* 마지막 차례가 기다림(WANT_*)이었다 */
     int queued;               /* 실행 목록에 있다(중복 방지) */
     int finished;             /* 끝 표시. 다시 실행하지 않는다 */
 } conn;
@@ -35,6 +47,7 @@ typedef struct conn {
 typedef struct {
     int epfd, listen_fd;
     const char *root;
+    route_table *routes;
     conn *all;
     conn *run_head, *run_tail; /* 다음 회차에 실행할 연결 */
     conn *done;                /* 회차 끝에 정리할 연결 */
@@ -77,42 +90,83 @@ static void mark_finished(loop *l, conn *c)
     }
 }
 
-static void run_conn(loop *l, conn *c)
+/* 한 소켓의 등록을 want로 맞춘다: 0이면 DEL, 처음이면 ADD, 그 밖은 MOD. *events는 등록한 방향이다. */
+static int set_interest(loop *l, int fd, tag *t, unsigned *events, unsigned want)
 {
-    http_conn_step step = http_conn_run(&c->http, now_ns());
-    unsigned want;
+    struct epoll_event ev;
+    int op;
+
+    if (*events == want) {
+        return 0;
+    }
+    op = want == 0 ? EPOLL_CTL_DEL : *events == 0 ? EPOLL_CTL_ADD : EPOLL_CTL_MOD;
+    ev.events = want;
+    ev.data.ptr = t;
+    if (epoll_ctl(l->epfd, op, fd, &ev) != 0) {
+        return -1;
+    }
+    *events = want;
+    return 0;
+}
+
+/* 기다리는 차례 결과에 맞춰 두 소켓의 등록을 바꾼다(D-67). 실패하면 -1(errno). */
+static int apply_interest(loop *l, conn *c, http_conn_step step)
+{
+    unsigned want_client = step == HTTP_CONN_WANT_READ ? EPOLLIN : step == HTTP_CONN_WANT_WRITE ? EPOLLOUT : 0;
+    unsigned want_backend = 0;
+
+    if (step == HTTP_CONN_WANT_BACKEND_READ || (step == HTTP_CONN_WANT_READ && c->http.uploading)) {
+        want_backend = EPOLLIN;
+    } else if (step == HTTP_CONN_WANT_BACKEND_WRITE) {
+        want_backend = EPOLLOUT | (c->http.uploading ? EPOLLIN : 0);
+    }
+    /* 등록해 둔 백엔드가 닫혔으면(세대가 바뀜) close가 등록도 지웠다. 같은 fd 번호의 새 소켓은 DEL 없이 ADD한다 */
+    if (c->backend_events != 0 && c->backend_reg_gen != c->http.be_gen) {
+        c->backend_events = 0;
+    }
+    if (set_interest(l, c->http.fd, &c->client_tag, &c->client_events, want_client) != 0) {
+        return -1;
+    }
+    if (c->http.be_fd >= 0 &&
+        set_interest(l, c->http.be_fd, &c->backend_tag, &c->backend_events, want_backend) != 0) {
+        return -1;
+    }
+    c->backend_reg_gen = c->http.be_gen;
+    return 0;
+}
+
+static void enqueue(loop *l, conn *c)
+{
+    c->waiting = 0;
+    if (!c->queued) {
+        c->queued = 1;
+        c->run_next = NULL;
+        if (l->run_tail != NULL) {
+            l->run_tail->run_next = c;
+        } else {
+            l->run_head = c;
+        }
+        l->run_tail = c;
+    }
+}
+
+static void run_conn(loop *l, conn *c, int wake)
+{
+    http_conn_step step = http_conn_run(&c->http, wake, now_ns());
 
     if (step == HTTP_CONN_FINISHED) {
         mark_finished(l, c);
         return;
     }
     if (step == HTTP_CONN_RUNNABLE) {
-        c->waiting = 0;
-        if (!c->queued) {
-            c->queued = 1;
-            c->run_next = NULL;
-            if (l->run_tail != NULL) {
-                l->run_tail->run_next = c;
-            } else {
-                l->run_head = c;
-            }
-            l->run_tail = c;
-        }
+        enqueue(l, c);
         return;
     }
     c->waiting = 1;
-    want = step == HTTP_CONN_WANT_WRITE ? EPOLLOUT : EPOLLIN;
-    if (want != c->interest) {
-        struct epoll_event ev;
-        ev.events = want;
-        ev.data.ptr = c;
-        if (epoll_ctl(l->epfd, EPOLL_CTL_MOD, c->http.fd, &ev) != 0) {
-            c->http.result = HTTP_CONN_ERROR; /* 관심 방향 변경 실패는 그 연결 ERROR(D-57) */
-            c->http.err = errno;
-            mark_finished(l, c);
-            return;
-        }
-        c->interest = want;
+    if (apply_interest(l, c, step) != 0) {
+        c->http.result = HTTP_CONN_ERROR; /* 등록 변경 실패는 그 연결 ERROR(D-57, D-67) */
+        c->http.err = errno;
+        mark_finished(l, c);
     }
 }
 
@@ -126,12 +180,17 @@ static void add_conn(loop *l, int fd)
         close(fd);
         return;
     }
-    http_conn_init(&c->http, fd, l->root, now_ns());
-    c->interest = EPOLLIN;
+    http_conn_init(&c->http, fd, l->root, l->routes, now_ns());
+    c->client_tag.owner = c->backend_tag.owner = c;
+    c->client_tag.backend = 0;
+    c->backend_tag.backend = 1;
+    c->client_events = EPOLLIN;
+    c->backend_events = 0;
+    c->backend_reg_gen = 0;
     c->waiting = 1;
     c->queued = c->finished = 0;
     ev.events = EPOLLIN;
-    ev.data.ptr = c;
+    ev.data.ptr = &c->client_tag;
     if (epoll_ctl(l->epfd, EPOLL_CTL_ADD, fd, &ev) != 0) {
         free(c);
         close(fd);
@@ -177,8 +236,11 @@ static int check_deadlines(loop *l)
             continue;
         }
         if (http_conn_expired(&c->http, now)) {
-            http_conn_expire(&c->http);
-            mark_finished(l, c);
+            if (http_conn_expire(&c->http) == HTTP_CONN_RUNNABLE) {
+                enqueue(l, c); /* 커밋 전 백엔드 만료: 504 순서로 다음 회차에 실행(D-67) */
+            } else {
+                mark_finished(l, c);
+            }
         } else if (c->http.deadline < earliest) {
             earliest = c->http.deadline;
         }
@@ -190,7 +252,7 @@ static int check_deadlines(loop *l)
     return earliest > INT_MAX ? INT_MAX : (int)earliest;
 }
 
-/* 끝난 연결 정리: 결과 기록(ERROR만 로그) → 파일 fd → 소켓 close(epoll 등록도 지워진다) → 해제. */
+/* 끝난 연결 정리: 결과 기록(ERROR만 로그) → 파일 fd·백엔드 소켓 → 소켓 close(epoll 등록도 지워진다) → 해제. */
 static void reap(loop *l)
 {
     while (l->done != NULL) {
@@ -233,15 +295,17 @@ static int fail(loop *l, const char *step, char *error, size_t error_size)
     return -1;
 }
 
-int server_loop_run(int listen_fd, const char *root, char *error, size_t error_size)
+int server_loop_run(int listen_fd, const char *root, route_table *routes, char *error, size_t error_size)
 {
     struct epoll_event events[LOOP_MAX_EVENTS], ev;
+    unsigned gens[LOOP_MAX_EVENTS]; /* 배치를 받은 직후 복사한 백엔드 세대(D-67) */
     loop l;
     int timeout = -1, flags;
 
     memset(&l, 0, sizeof(l));
     l.listen_fd = listen_fd;
     l.root = root;
+    l.routes = routes;
     l.epfd = epoll_create1(0);
     if (l.epfd < 0) {
         return fail(&l, "epoll_create1", error, error_size);
@@ -267,22 +331,38 @@ int server_loop_run(int listen_fd, const char *root, char *error, size_t error_s
             }
             n = 0;
         }
+        for (i = 0; i < n; i++) { /* 아무것도 실행하기 전에 백엔드 알림의 세대를 복사한다 */
+            tag *t = events[i].data.ptr;
+            gens[i] = t != NULL ? t->owner->http.be_gen : 0;
+        }
         for (i = 0; i < n; i++) { /* HUP·ERR도 깨우는 정보일 뿐이라 같은 차례 실행으로 다룬다(D-57) */
-            conn *c = events[i].data.ptr;
-            if (c == NULL) {
+            tag *t = events[i].data.ptr;
+            conn *c;
+            if (t == NULL) {
                 if (accept_some(&l) != 0) {
                     return fail(&l, "accept", error, error_size);
                 }
-            } else if (!c->finished) {
-                run_conn(&l, c);
+                continue;
+            }
+            c = t->owner;
+            if (c->finished) {
+                continue;
+            }
+            if (!t->backend) {
+                run_conn(&l, c, HTTP_CONN_WAKE_CLIENT);
+            } else if (c->http.be_gen == gens[i] && c->http.be_fd >= 0) { /* 세대가 바뀌었으면 옛 소켓 알림이다 */
+                unsigned e = events[i].events;
+                run_conn(&l, c,
+                         (e & EPOLLIN ? HTTP_CONN_WAKE_BACKEND_IN : 0) | (e & EPOLLOUT ? HTTP_CONN_WAKE_BACKEND_OUT : 0) |
+                             (e & (EPOLLERR | EPOLLHUP) ? HTTP_CONN_WAKE_BACKEND_ERR : 0));
             }
         }
         while (runnable != NULL) {
             conn *c = runnable;
             runnable = c->run_next;
             c->queued = 0;
-            if (!c->finished) {
-                run_conn(&l, c);
+            if (!c->finished && !c->waiting) { /* 그사이 알림 실행으로 대기로 바뀌었으면 건너뛴다(D-67) */
+                run_conn(&l, c, HTTP_CONN_WAKE_INTERNAL);
             }
         }
         timeout = check_deadlines(&l);

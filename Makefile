@@ -12,11 +12,12 @@ DEBUG_LDFLAGS = -fsanitize=address
 TARGET      = webserver
 DEBUG_TARGET = webserver-debug
 SRC         = src/main.c src/options.c src/listener.c src/server_loop.c src/http_conn.c src/http_parser.c \
-              src/http_response.c src/io.c src/static_file.c src/mime.c
+              src/http_response.c src/io.c src/static_file.c src/mime.c \
+              src/route.c src/proxy.c
 HDR         = src/options.h src/listener.h src/server_loop.h src/http_conn.h src/http_parser.h src/http_response.h \
-              src/io.h src/static_file.h src/mime.h
+              src/io.h src/static_file.h src/mime.h src/route.h src/proxy.h
 TEST_TARGETS = tests/test_options tests/test_echo tests/test_http_parser tests/test_http_response tests/test_http_conn \
-               tests/test_mime tests/test_static_file tests/test_server_loop
+               tests/test_mime tests/test_static_file tests/test_server_loop tests/test_route tests/test_proxy tests/test_proxy_conn
 EXPERIMENT  = experiments/bind_no_reuse
 
 WWW        = www
@@ -51,6 +52,9 @@ test: $(TEST_TARGETS)
 	./tests/test_mime
 	./tests/test_static_file
 	./tests/test_server_loop
+	./tests/test_route
+	./tests/test_proxy
+	./tests/test_proxy_conn
 
 tests/test_options: tests/test_options.c src/options.c src/options.h $(BUILD_STAMP)
 	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_options.c src/options.c $(DEBUG_LDFLAGS)
@@ -64,8 +68,11 @@ tests/test_http_parser: tests/test_http_parser.c src/http_parser.c src/http_pars
 tests/test_http_response: tests/test_http_response.c src/http_response.c src/http_response.h src/io.c src/io.h $(BUILD_STAMP)
 	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_http_response.c src/http_response.c src/io.c $(DEBUG_LDFLAGS)
 
-HTTP_CONN_SRC = src/http_conn.c src/http_parser.c src/http_response.c src/io.c src/static_file.c src/mime.c
-tests/test_http_conn: tests/test_http_conn.c $(HTTP_CONN_SRC) src/http_conn.h src/http_parser.h src/http_response.h src/io.h src/static_file.h src/mime.h $(BUILD_STAMP)
+HTTP_CONN_SRC = src/http_conn.c src/http_parser.c src/http_response.c src/io.c src/static_file.c src/mime.c \
+                src/route.c src/proxy.c
+HTTP_CONN_HDR = src/http_conn.h src/http_parser.h src/http_response.h src/io.h src/static_file.h src/mime.h \
+                src/route.h src/proxy.h
+tests/test_http_conn: tests/test_http_conn.c $(HTTP_CONN_SRC) $(HTTP_CONN_HDR) $(BUILD_STAMP)
 	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_http_conn.c $(HTTP_CONN_SRC) $(DEBUG_LDFLAGS)
 
 tests/test_mime: tests/test_mime.c src/mime.c src/mime.h $(BUILD_STAMP)
@@ -76,8 +83,20 @@ tests/test_static_file: tests/test_static_file.c $(STATIC_FILE_SRC) src/static_f
 	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_static_file.c $(STATIC_FILE_SRC) $(DEBUG_LDFLAGS)
 
 # TC-5-11: accept 재시도 오류는 링크 단계 --wrap으로 주입한다(제품 코드에 시험용 분기 없음).
-tests/test_server_loop: tests/test_server_loop.c src/server_loop.c src/server_loop.h $(HTTP_CONN_SRC) src/http_conn.h src/http_parser.h src/http_response.h src/io.h src/static_file.h src/mime.h $(BUILD_STAMP)
+tests/test_server_loop: tests/test_server_loop.c src/server_loop.c src/server_loop.h $(HTTP_CONN_SRC) $(HTTP_CONN_HDR) $(BUILD_STAMP)
 	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_server_loop.c src/server_loop.c $(HTTP_CONN_SRC) $(DEBUG_LDFLAGS) -Wl,--wrap=accept4
+
+ROUTE_SRC = src/route.c
+tests/test_route: tests/test_route.c $(ROUTE_SRC) src/route.h $(BUILD_STAMP)
+	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_route.c $(ROUTE_SRC) $(DEBUG_LDFLAGS)
+
+tests/test_proxy: tests/test_proxy.c src/proxy.c src/proxy.h src/http_parser.c src/http_parser.h src/http_response.h $(BUILD_STAMP)
+	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_proxy.c src/proxy.c src/http_parser.c $(DEBUG_LDFLAGS)
+
+# Step 6: 백엔드 소켓은 링크 단계 --wrap으로 socketpair를 돌려받아 시험이 연기한다(제품 코드에 시험용 분기 없음).
+tests/test_proxy_conn: tests/test_proxy_conn.c $(HTTP_CONN_SRC) $(HTTP_CONN_HDR) $(BUILD_STAMP)
+	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_proxy_conn.c $(HTTP_CONN_SRC) $(DEBUG_LDFLAGS) \
+		-Wl,--wrap=socket -Wl,--wrap=connect -Wl,--wrap=getsockopt
 
 # D-06 실험: SO_REUSEADDR 없이 bind만 해 본다. 서버 소스와 분리한 별도 프로그램이다(빌드만 한다).
 experiment: $(EXPERIMENT)
@@ -121,7 +140,7 @@ clean:
 help:
 	@echo "make          기본 빌드 ($(TARGET))"
 	@echo "make debug    디버그 빌드 ($(DEBUG_TARGET), AddressSanitizer)"
-	@echo "make test     단위 테스트 빌드 후 실행 (test_options, test_echo, test_http_parser, test_http_response, test_http_conn, test_mime, test_static_file, test_server_loop)"
+	@echo "make test     단위 테스트 빌드 후 실행 (test_options, test_echo, test_http_parser, test_http_response, test_http_conn, test_mime, test_static_file, test_server_loop, test_route, test_proxy, test_proxy_conn)"
 	@echo "make experiment SO_REUSEADDR 없는 bind 실험 프로그램 빌드 ($(EXPERIMENT))"
 	@echo "make fixtures 컨테이너 내부 /home/jungle/mini-webserver-www에 테스트용 www 준비, 경로를 stdout에 출력"
 	@echo "make clean    빌드 산출물 삭제"
