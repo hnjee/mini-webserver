@@ -5,6 +5,7 @@
 #include "server.h"
 
 #include "http.h"
+#include "proxy.h"
 #include "respond.h"
 
 #include <errno.h>
@@ -17,15 +18,23 @@
 
 #define FILE_BUF_SIZE 8192
 
-/* 관심 목록에서 이 연결이 지켜볼 일을 바꿔요 (EPOLLIN 또는 EPOLLOUT) */
-static void watch(struct server *s, struct conn *c, unsigned events)
+void conn_watch_client(struct server *s, struct conn *c, unsigned events)
 {
+    if (c->cli_events == events)
+        return;
     struct epoll_event ev;
     memset(&ev, 0, sizeof(ev));
     ev.events = events;
-    ev.data.ptr = c;
+    ev.data.ptr = &c->h_cli;
     if (epoll_ctl(s->ep, EPOLL_CTL_MOD, c->fd, &ev) < 0)
         perror("epoll_ctl MOD");
+    c->cli_events = events;
+}
+
+/* 관심 목록에서 이 연결이 지켜볼 일을 바꿔요 (EPOLLIN 또는 EPOLLOUT) */
+static void watch(struct server *s, struct conn *c, unsigned events)
+{
+    conn_watch_client(s, c, events);
 }
 
 /* 본문 길이를 정해요. 0: c->cl에 길이, 그 밖: 경계를 알 수 없어 보낼 상태 코드 (400·411·413·501) */
@@ -167,6 +176,11 @@ static void advance(struct server *s, struct conn *c)
             room = sizeof(c->buf) - c->len;
         } else if (c->state == ST_BODY) {
             if (c->body_len == c->cl) {
+                struct route *rt = s->routes != NULL ? routes_match(s->routes, c->req.path) : NULL;
+                if (rt != NULL) {                /* 라우팅 표에 맞으면 백엔드로 (S6-02) */
+                    proxy_start(s, c, rt);
+                    return;
+                }
                 if (prepare_response(s, c) < 0) {
                     server_close_conn(s, c);
                     return;
@@ -202,6 +216,20 @@ static void advance(struct server *s, struct conn *c)
 }
 
 /* ---- 밖에 여는 함수 ---- */
+
+void conn_send_error(struct server *s, struct conn *c, int status)
+{
+    response_reset(c);
+    c->keep = 0;
+    c->hdr_end = c->len;                         /* 뒤에 붙은 요청은 버려요 */
+    c->want_out = 0;
+    conn_watch_client(s, c, EPOLLIN);
+    if (prepare_error(c, status, NULL) < 0) {
+        server_close_conn(s, c);
+        return;
+    }
+    start_write(s, c);
+}
 
 void conn_on_readable(struct server *s, struct conn *c)
 {

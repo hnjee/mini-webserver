@@ -1,16 +1,18 @@
 /*
- * 서버: docs/design/step1.md ~ step5.md
- * 리슨 소켓, epoll과 메인 루프, 연결 받기와 정리를 맡아요 (Step 5).
- * 연결 하나의 읽기·보내기는 conn.c, 응답 만들기는 respond.c에 있어요.
+ * 서버: docs/design/step1.md ~ step6.md
+ * 리슨 소켓, epoll과 메인 루프, 연결 받기와 정리, 워커 스레드를 맡아요 (Step 5, 6).
+ * 연결 하나의 읽기·보내기는 conn.c, 응답 만들기는 respond.c, 프록시는 proxy.c에 있어요.
  */
 #include "server.h"
 
+#include "proxy.h"
 #include "respond.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,6 +69,10 @@ int server_init(struct server *s, int listen_fd, const char *root)
     memset(s, 0, sizeof(*s));
     s->listen_fd = listen_fd;
     s->root = root;
+    s->h_listen.kind = H_LISTEN;
+    s->h_listen.c = NULL;
+    s->connect_timeout = PROXY_CONNECT_TIMEOUT_SEC;
+    s->response_timeout = PROXY_RESPONSE_TIMEOUT_SEC;
     s->ep = epoll_create1(0);
     if (s->ep < 0) {
         perror("epoll_create1");
@@ -75,13 +81,16 @@ int server_init(struct server *s, int listen_fd, const char *root)
     set_nonblock(listen_fd);
     struct epoll_event ev;
     memset(&ev, 0, sizeof(ev));
-    ev.events = EPOLLIN;
-    ev.data.ptr = NULL;                      /* NULL이면 리슨 소켓 */
+    ev.events = EPOLLIN | EPOLLEXCLUSIVE;        /* 워커 여럿이 같이 지켜봐도 손님 하나에 하나만 깨워요 (S6-01) */
+    ev.data.ptr = &s->h_listen;
     if (epoll_ctl(s->ep, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
-        perror("epoll_ctl ADD listen");
-        close(s->ep);
-        s->ep = -1;
-        return -1;
+        ev.events = EPOLLIN;                     /* 오래된 커널: EPOLLEXCLUSIVE 없이 */
+        if (epoll_ctl(s->ep, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
+            perror("epoll_ctl ADD listen");
+            close(s->ep);
+            s->ep = -1;
+            return -1;
+        }
     }
     return 0;
 }
@@ -109,13 +118,19 @@ int server_on_accept(struct server *s)
         }
         c->fd = fd;
         c->file_fd = -1;
+        c->back_fd = -1;
         c->state = ST_HEADER;
         c->last_active = time(NULL);
+        c->h_cli.kind = H_CLIENT;
+        c->h_cli.c = c;
+        c->h_back.kind = H_BACKEND;
+        c->h_back.c = c;
+        c->cli_events = EPOLLIN;
 
         struct epoll_event ev;
         memset(&ev, 0, sizeof(ev));
         ev.events = EPOLLIN;
-        ev.data.ptr = c;                     /* 알림이 오면 이 conn을 돌려받아요 */
+        ev.data.ptr = &c->h_cli;             /* 알림이 오면 이 손잡이로 conn을 찾아요 */
         if (epoll_ctl(s->ep, EPOLL_CTL_ADD, fd, &ev) < 0) {
             perror("epoll_ctl ADD");
             close(fd);
@@ -133,9 +148,11 @@ int server_on_accept(struct server *s)
 }
 
 
-
 void server_close_conn(struct server *s, struct conn *c)
 {
+    if (c->closed)
+        return;
+    proxy_cleanup(s, c);                     /* 백엔드 소켓과 중계 버퍼 (S6-10) */
     if (epoll_ctl(s->ep, EPOLL_CTL_DEL, c->fd, NULL) < 0)
         perror("epoll_ctl DEL");
     /* 쓰기를 먼저 닫고 남은 데이터를 한 번 읽어 버려요. close()에서 RST가 나가지 않게. 논블로킹이라 기다리지 않아요 */
@@ -154,7 +171,22 @@ void server_close_conn(struct server *s, struct conn *c)
     if (c->next != NULL)
         c->next->prev = c->prev;
     s->nconn--;
-    free(c);
+
+    /* 같은 바퀴의 다른 알림(백엔드 소켓 등)이 이 conn을 가리킬 수 있어서, 바퀴가 끝날 때 해제해요 */
+    c->closed = 1;
+    c->prev = NULL;
+    c->next = s->dead;
+    s->dead = c;
+}
+
+/* 이번 바퀴에 닫힌 conn을 해제해요 */
+static void reap(struct server *s)
+{
+    while (s->dead != NULL) {
+        struct conn *c = s->dead;
+        s->dead = c->next;
+        free(c);
+    }
 }
 
 int server_sweep_idle(struct server *s, time_t now)
@@ -163,7 +195,9 @@ int server_sweep_idle(struct server *s, time_t now)
     struct conn *c = s->conns;
     while (c != NULL) {
         struct conn *next = c->next;
-        if (now - c->last_active >= IDLE_TIMEOUT_SEC) {
+        if (proxy_active(c)) {
+            closed += proxy_check_timeout(s, c, now);   /* 백엔드 시간 제한 (S6-07) */
+        } else if (now - c->last_active >= IDLE_TIMEOUT_SEC) {
             server_close_conn(s, c);
             closed++;
         }
@@ -176,38 +210,87 @@ void server_free(struct server *s)
 {
     while (s->conns != NULL)
         server_close_conn(s, s->conns);
+    reap(s);
     if (s->ep >= 0)
         close(s->ep);
     s->ep = -1;
 }
 
-void server_run(int listen_fd, const char *root_real)
+int server_poll_once(struct server *s, int timeout_ms)
 {
-    struct server s;
-    if (server_init(&s, listen_fd, root_real) < 0)
-        return;
-
     struct epoll_event evs[MAX_EVENTS];
+    int n = epoll_wait(s->ep, evs, MAX_EVENTS, timeout_ms);
+    if (n < 0) {
+        if (errno == EINTR)
+            return 0;
+        perror("epoll_wait");
+        return -1;
+    }
+    for (int i = 0; i < n; i++) {
+        struct handle *h = evs[i].data.ptr;
+        unsigned events = evs[i].events;
+        if (h->kind == H_LISTEN) {
+            server_on_accept(s);                            /* 손님 받기 */
+            continue;
+        }
+        struct conn *c = h->c;
+        if (c->closed)
+            continue;                                       /* 이번 바퀴에 이미 닫힘 */
+        if (h->kind == H_BACKEND)
+            proxy_on_backend(s, c, events);                 /* 백엔드 쪽 (Step 6) */
+        else if (proxy_active(c))
+            proxy_on_client(s, c, events);                  /* 프록시 중인 클라이언트 쪽 */
+        else if (events & (EPOLLHUP | EPOLLERR))
+            server_close_conn(s, c);
+        else if (c->state == ST_WRITE)
+            conn_on_writable(s, c);                         /* 이어서 보내기 */
+        else
+            conn_on_readable(s, c);                         /* 이어서 읽기 */
+    }
+    reap(s);
+    return n;
+}
+
+/* 워커 하나: 자기 epoll로 Step 5 루프를 돌려요 */
+struct worker_arg {
+    int listen_fd;
+    const char *root;
+    struct routes *routes;
+};
+
+static void *worker_main(void *p)
+{
+    const struct worker_arg *a = p;
+    struct server s;
+    if (server_init(&s, a->listen_fd, a->root) < 0)
+        return NULL;
+    s.routes = a->routes;
     for (;;) {
-        int n = epoll_wait(s.ep, evs, MAX_EVENTS, TICK_MS);
-        if (n < 0) {
-            if (errno == EINTR)
-                continue;
-            perror("epoll_wait");
+        if (server_poll_once(&s, TICK_MS) < 0)
             break;
-        }
-        for (int i = 0; i < n; i++) {
-            struct conn *c = evs[i].data.ptr;
-            if (c == NULL)
-                server_on_accept(&s);                       /* 손님 받기 */
-            else if (evs[i].events & (EPOLLHUP | EPOLLERR))
-                server_close_conn(&s, c);
-            else if (c->state == ST_WRITE)
-                conn_on_writable(&s, c);                    /* 이어서 보내기 */
-            else
-                conn_on_readable(&s, c);                    /* 이어서 읽기 */
-        }
-        server_sweep_idle(&s, time(NULL));                  /* 15초 넘은 연결 닫기 */
+        server_sweep_idle(&s, time(NULL));                  /* 15초 넘은 연결, 백엔드 시간 제한 */
     }
     server_free(&s);
+    return NULL;
+}
+
+void server_run(int listen_fd, const char *root_real, struct routes *routes, int nworkers)
+{
+    if (nworkers < 1)
+        nworkers = 1;
+    if (nworkers > WORKERS_MAX)
+        nworkers = WORKERS_MAX;
+    struct worker_arg arg = {listen_fd, root_real, routes};
+    pthread_t tids[WORKERS_MAX];
+    int started = 0;
+    for (int i = 0; i < nworkers; i++) {
+        int err = pthread_create(&tids[i], NULL, worker_main, &arg);
+        if (err != 0) {
+            fprintf(stderr, "pthread_create: %s\n", strerror(err));
+            break;
+        }
+        started++;
+    }
+    for (int i = 0; i < started; i++)                       /* 메인 스레드는 기다리기만 해요 */
+        pthread_join(tids[i], NULL);
 }
