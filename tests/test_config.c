@@ -1,5 +1,6 @@
 /*
  * Step 0 단위 테스트: docs/tests/step0.md 4장 UT-01 ~ UT-17
+ * Step 6 단위 테스트: docs/tests/step6.md 3장 -t (이름 앞에 S6을 붙인다)
  * 저장소 루트에서 실행한다 (make test). ./www 경로를 쓰기 때문이다.
  */
 #include "config.h"
@@ -113,6 +114,32 @@ static void ut15_to_ut17_duplicates(void)
     expect("UT-17 -c 두 번 → USAGE", a17, ARGC(a17), CONFIG_ERR_USAGE);
 }
 
+/* Step 6: -t 워커 수 (S6-01) */
+static void s6_threads(void)
+{
+    char *a1[] = {"webserver", "-p", "8080", "-r", "./www", "-t", "4", NULL};
+    struct server_config c = {0};
+    CHECK("S6 UT-09 -t 4 → OK", config_parse(ARGC(a1), a1, &c) == CONFIG_OK);
+    CHECK("S6 UT-09 threads == 4", c.threads == 4);
+
+    char *a2[] = {"webserver", "-p", "8080", "-r", "./www", NULL};
+    struct server_config d = {.threads = 99};
+    CHECK("S6 UT-10 -t 없음 → threads == 0", config_parse(ARGC(a2), a2, &d) == CONFIG_OK && d.threads == 0);
+
+    char *a3[] = {"webserver", "-p", "8080", "-r", "./www", "-t", "1", NULL};
+    char *a4[] = {"webserver", "-p", "8080", "-r", "./www", "-t", "256", NULL};
+    char *a5[] = {"webserver", "-p", "8080", "-r", "./www", "-t", "0", NULL};
+    char *a6[] = {"webserver", "-p", "8080", "-r", "./www", "-t", "257", NULL};
+    char *a7[] = {"webserver", "-p", "8080", "-r", "./www", "-t", "abc", NULL};
+    char *a8[] = {"webserver", "-p", "8080", "-r", "./www", "-t", "2", "-t", "3", NULL};
+    expect("S6 UT-11 -t 1 → OK (경곗값)",   a3, ARGC(a3), CONFIG_OK);
+    expect("S6 UT-11 -t 256 → OK (경곗값)", a4, ARGC(a4), CONFIG_OK);
+    expect("S6 UT-12 -t 0 → THREADS",       a5, ARGC(a5), CONFIG_ERR_THREADS);
+    expect("S6 UT-12 -t 257 → THREADS",     a6, ARGC(a6), CONFIG_ERR_THREADS);
+    expect("S6 UT-12 -t abc → THREADS",     a7, ARGC(a7), CONFIG_ERR_THREADS);
+    expect("S6 UT-13 -t 두 번 → USAGE",     a8, ARGC(a8), CONFIG_ERR_USAGE);
+}
+
 int main(void)
 {
     printf("test_config\n");
@@ -122,6 +149,7 @@ int main(void)
     ut04_to_ut13();
     ut14_call_twice();
     ut15_to_ut17_duplicates();
+    s6_threads();
     printf("%d개 중 %d개 통과\n", g_run, g_run - g_fail);
     return g_fail == 0 ? 0 : 1;
 }

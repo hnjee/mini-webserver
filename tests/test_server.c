@@ -10,6 +10,7 @@
  *   부모는 127.0.0.1로 접속해 클라이언트로서 요청을 쓰고 쓰기를 닫은 뒤, 서버가 닫을 때까지 응답을 읽는다.
  *   다 읽으면 자식을 SIGKILL로 끝낸다. handle_conn() 리턴값과 서버 쪽 남은 데이터 확인은 빠졌다.
  *   서버의 루트는 /tmp 아래에 만든 테스트용 www 폴더다.
+ * - Step 6: docs/tests/step6.md 5장. run_conn은 워커 2개로 띄운다. S6 UT-29는 -t 4면 스레드가 5개인지 본다.
  */
 /* realpath()는 POSIX의 XSI 부분이라 _XOPEN_SOURCE를 켜야 선언된다 */
 #define _XOPEN_SOURCE 700
@@ -230,7 +231,7 @@ static void sleep_100ms(void)
 }
 
 /*
- * 자식이 server_run(listen_fd, g_root)을 돌린다. 부모는 그 포트로 접속해 req를 쓰고
+ * 자식이 server_run(listen_fd, g_root, NULL, 2)을 돌린다. 부모는 그 포트로 접속해 req를 쓰고
  * (split이면 split바이트까지 쓰고 0.1초 쉰 뒤 나머지) 쓰기를 닫은 다음, 서버가 닫을 때까지 응답을 읽는다.
  */
 static void run_conn(const char *req, size_t len, size_t split, struct conn_result *res)
@@ -251,7 +252,7 @@ static void run_conn(const char *req, size_t len, size_t split, struct conn_resu
 
     pid_t server = fork();
     if (server == 0) {
-        server_run(lfd, g_root);
+        server_run(lfd, g_root, NULL, 2);   /* 워커 2개 (Step 6) */
         _exit(0);
     }
     close(lfd);
@@ -701,6 +702,44 @@ static void s4_ut35_to_ut44_errors(void)
     free_result(&r);
 }
 
+/* ---- Step 6: 워커 스레드 ---- */
+
+/* S6 UT-29: 워커 4개로 띄우면 스레드가 5개(메인 1 + 워커 4) */
+static void s6_ut29_threads(void)
+{
+    int lfd = server_listen(0);
+    if (lfd < 0) {
+        CHECK("S6 UT-29 리슨 소켓", 0);
+        return;
+    }
+    pid_t server = fork();
+    if (server == 0) {
+        server_run(lfd, g_root, NULL, 4);
+        _exit(0);
+    }
+    close(lfd);
+    int n = -1;
+    for (int i = 0; i < 20; i++) {               /* 스레드가 다 뜰 때까지 최대 2초 */
+        sleep_100ms();
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/task", (int)server);
+        DIR *d = opendir(path);
+        if (d == NULL)
+            break;
+        n = 0;
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL)
+            if (e->d_name[0] != '.')
+                n++;
+        closedir(d);
+        if (n == 5)
+            break;
+    }
+    CHECK("S6 UT-29 스레드 5개 (메인 1 + 워커 4)", n == 5);
+    kill(server, SIGKILL);
+    waitpid(server, NULL, 0);
+}
+
 int main(void)
 {
     signal(SIGPIPE, SIG_IGN);   /* 끊긴 소켓에 써도 테스트 프로그램이 죽지 않게 */
@@ -734,6 +773,7 @@ int main(void)
     s4_ut24_to_ut28_echo();
     s4_ut29_to_ut34_keep_alive();
     s4_ut35_to_ut44_errors();
+    s6_ut29_threads();
     remove_fixture();
 
     printf("%d개 중 %d개 통과\n", g_run, g_run - g_fail);
