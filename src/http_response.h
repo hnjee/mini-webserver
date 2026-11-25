@@ -49,4 +49,14 @@ int http_response_send_status(int fd, int status, const http_response_extra *ext
 /* "HTTP/1.1 100 Continue\r\n\r\n"만 쓴다(D-50, D-52). Date·Content-Length·본문은 없다. */
 int http_response_send_continue(int fd);
 
+/*
+ * D-58: 위 send_* 세 함수와 같은 바이트를 fd 대신 buf[0..cap)에 만든다. 인자 규칙도 같다.
+ * 성공이면 만든 길이, 실패면 -1(errno: 계약 위반이나 cap 부족은 EINVAL). 실패하면 buf 내용은 정하지 않는다.
+ * send_head·send_status·send_continue는 이 함수들 위의 얇은 감싸개다.
+ */
+int http_response_format_head(char *buf, size_t cap, int status, const char *content_type,
+                              size_t content_length, const http_response_extra *extra);
+int http_response_format_status(char *buf, size_t cap, int status, const http_response_extra *extra);
+int http_response_format_continue(char *buf, size_t cap);
+
 #endif /* HTTP_RESPONSE_H */

@@ -1,143 +1,113 @@
 #define _POSIX_C_SOURCE 200809L
 
+/*
+ * 연결 하나의 상태 전이(D-57). 루프가 준비 알림·내부 실행마다 http_conn_run을 한 번 부른다.
+ * 한 차례는 "출력이 남아 있으면 먼저 보내고(flush), 비면 지금 상태의 처리 함수"를 외부 I/O가 필요할 때까지 반복한다.
+ */
 #include "http_conn.h"
-#include "http_parser.h"
-#include "http_response.h"
-#include "io.h"
 #include "static_file.h"
 
 #include <errno.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
-#include <sys/time.h>
-#include <time.h>
 #include <unistd.h>
 
-#define HTTP_CONN_TIMEOUT_USEC 5000000L /* D-41, D-53, D-54: 5초 */
+/* 상태(README 상태도). 상태마다 처리 함수 하나가 다음 상태를 정한다. */
+enum {
+    ST_HEAD,       /* 머리 받기·판정 */
+    ST_BODY_START, /* (100을 보낸 뒤) 본문 단계 시작 */
+    ST_ECHO,       /* /echo 본문을 받아 되돌림 */
+    ST_DISCARD,    /* 버릴 본문 읽기, 다 읽으면 응답 */
+    ST_FILE,       /* 파일 조각 채우기 */
+    ST_RESPONDED,  /* 응답 출력을 다 보냄: 유지·닫기·정리 판단 */
+    ST_DRAIN       /* 닫기 전 정리(D-54) */
+};
 
-static int set_timeout(int fd, int option, long usec)
+/* 기다리는 종류(D-59 표의 행). 만료 결과가 이것으로 정해진다. */
+enum { WAIT_IDLE, WAIT_READ, WAIT_WRITE, WAIT_DRAIN };
+
+#define CONTINUE (-1) /* 처리 함수가 같은 차례 안에서 계속하라는 값. 그 밖은 http_conn_step */
+
+/* 한 차례의 예산(D-56). */
+typedef struct {
+    int did_read;     /* 소켓 read 1번 */
+    int did_fill;     /* 파일 조각 1번 */
+    size_t may_write; /* 차례를 시작할 때 있던 출력 바이트 */
+} turn;
+
+typedef int (*state_fn)(http_conn *c, turn *t, long long now);
+
+static int finish(http_conn *c, http_conn_result result, int err)
 {
-    struct timeval tv;
-    tv.tv_sec = usec / 1000000L;
-    tv.tv_usec = usec % 1000000L;
-    return setsockopt(fd, SOL_SOCKET, option, &tv, sizeof(tv));
+    c->result = result;
+    c->err = err;
+    return HTTP_CONN_FINISHED;
 }
 
-static int timed_out(void)
+/* 기다림에 들어간다. 마감은 바꾸지 않는다(마감은 진입·진행 사건에서 이미 잡았다, D-59). */
+static int wait_for(http_conn *c, int kind)
 {
-    return errno == EAGAIN || errno == EWOULDBLOCK;
+    c->wait = kind;
+    return kind == WAIT_WRITE ? HTTP_CONN_WANT_WRITE : HTTP_CONN_WANT_READ;
 }
 
-/* read 한 번. EINTR은 다시 읽는다(기다림이 다시 5초가 된다, D-53). */
-static ssize_t read_once(int fd, void *buf, size_t cap)
+static int would_block(int err)
 {
-    ssize_t n;
-    do {
-        n = read(fd, buf, cap);
-    } while (n < 0 && errno == EINTR);
-    return n;
+    return err == EAGAIN || err == EWOULDBLOCK || err == EINTR; /* EINTR도 이번 차례는 기다림으로 둔다 */
 }
 
-/* 요청 도중(머리·본문) read가 0이나 -1을 돌려줬을 때의 결과(D-53). */
-static http_conn_result mid_request_failure(ssize_t n)
+/* 출력 버퍼를 n바이트로 채웠다. 쓰기 대기의 마감은 채운 때부터다(D-59). */
+static void filled(http_conn *c, size_t n, long long now)
 {
-    if (n == 0) {
-        return HTTP_CONN_PEER_CLOSED;
-    }
-    return timed_out() ? HTTP_CONN_TIMED_OUT : HTTP_CONN_ERROR;
+    c->out_pos = 0;
+    c->out_len = n;
+    c->deadline = now + HTTP_CONN_TIMEOUT_NS;
 }
 
-/*
- * D-54: 쓰기 방향을 닫고, 상대가 닫음·읽기 오류·정리 시작부터 총 5초 중 먼저 오는 때까지 읽어 버린다.
- * read마다 남은 시간으로 SO_RCVTIMEO를 다시 건다. {0,0}은 "제한 없음"이라 남은 시간이 0 이하면 읽지 않는다.
- */
-static void drain_before_close(int fd, char *buf, size_t cap)
+/* in 맨 앞 n바이트를 버리고 나머지(다음 요청 시작)를 앞으로 옮긴다(D-47). */
+static void consume(http_conn *c, size_t n)
 {
-    struct timespec start, now;
+    memmove(c->in, c->in + n, c->in_len - n);
+    c->in_len -= n;
+}
 
-    if (shutdown(fd, SHUT_WR) != 0 || clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
-        return;
-    }
-    for (;;) {
-        long long left_ns;
-        long left_us;
+/* 남은 출력을 보낸다. 이번 차례에 채운 출력은 쓰지 않고 RUNNABLE로 다음 회차에 넘긴다(D-56). */
+static int flush(http_conn *c, turn *t, long long now)
+{
+    while (c->out_pos < c->out_len) {
+        size_t want = c->out_len - c->out_pos;
         ssize_t n;
 
-        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
-            return;
+        if (t->may_write == 0) {
+            return HTTP_CONN_RUNNABLE;
         }
-        left_ns = HTTP_CONN_TIMEOUT_USEC * 1000LL -
-                  ((long long)(now.tv_sec - start.tv_sec) * 1000000000LL + (now.tv_nsec - start.tv_nsec));
-        if (left_ns <= 0) {
-            return;
+        if (want > t->may_write) {
+            want = t->may_write;
         }
-        left_us = (long)(left_ns / 1000);
-        if (left_us == 0) {
-            left_us = 1; /* 양수가 {0,0}(제한 없음)으로 내려가지 않게 한다 */
+        n = write(c->fd, c->out + c->out_pos, want);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return errno == EAGAIN || errno == EWOULDBLOCK ? wait_for(c, WAIT_WRITE) : finish(c, HTTP_CONN_ERROR, errno);
         }
-        if (set_timeout(fd, SO_RCVTIMEO, left_us) != 0) {
-            return;
-        }
-        n = read(fd, buf, cap);
-        if (n > 0 || (n < 0 && errno == EINTR)) {
-            continue;
-        }
-        return; /* 상대가 닫음, 타임아웃, ECONNRESET 등 모든 읽기 오류 */
+        c->out_pos += (size_t)n;
+        t->may_write -= (size_t)n;
+        /* 성공한 write는 진행이다. 마지막 write가 곧 "출력을 다 보낸 때"라 다음 대기도 여기서부터 잰다(D-59). */
+        c->deadline = now + HTTP_CONN_TIMEOUT_NS;
     }
+    c->out_pos = c->out_len = 0;
+    return CONTINUE;
 }
 
-/*
- * 본문 중 소켓에 남은 remaining 바이트를 buf 크기 조각으로 읽는다(D-39, D-47).
- * echo면 읽은 대로 fd에 돌려주고, 아니면 버린다. 다 읽으면 DONE.
- */
-static http_conn_result pump_body(int fd, char *buf, size_t cap, size_t remaining, int echo)
+/* 요청 도중 read가 0이나 -1을 돌려줬을 때(D-53). */
+static int mid_request_failure(http_conn *c, ssize_t n)
 {
-    while (remaining > 0) {
-        ssize_t n = read_once(fd, buf, remaining < cap ? remaining : cap);
-        if (n <= 0) {
-            return mid_request_failure(n);
-        }
-        if (echo && io_write_all(fd, buf, (size_t)n) != 0) {
-            return HTTP_CONN_ERROR;
-        }
-        remaining -= (size_t)n;
+    if (n == 0) {
+        return finish(c, HTTP_CONN_PEER_CLOSED, 0);
     }
-    return HTTP_CONN_DONE;
-}
-
-/*
- * D-26 3·4단계: static_file 결과를 상태 코드로 바꾸고, 200이면 머리 → 본문 → 파일 fd 닫기(D-29).
- * 반환: 0 보냄, 1 닫는 코드(정적 판정 400)를 보냄, -1 쓰기 실패(errno 보존).
- */
-static int serve_file(int fd, const char *root, const char *target, http_connection connection)
-{
-    http_response_extra extra = {NULL, NULL, connection};
-    static_file file;
-    int rc, err;
-
-    switch (static_file_open(root, target, &file)) {
-    case STATIC_FILE_OK: break;
-    case STATIC_FILE_REDIRECT:
-        extra.location = file.location;
-        return http_response_send_status(fd, 301, &extra);
-    case STATIC_FILE_BAD_TARGET:
-        extra.connection = HTTP_CONNECTION_CLOSE; /* D-51: 정적 판정 400도 닫는다 */
-        return http_response_send_status(fd, 400, &extra) == 0 ? 1 : -1;
-    case STATIC_FILE_FORBIDDEN: return http_response_send_status(fd, 403, &extra);
-    case STATIC_FILE_NOT_FOUND: return http_response_send_status(fd, 404, &extra);
-    case STATIC_FILE_ERROR:
-    default: return http_response_send_status(fd, 500, &extra);
-    }
-    rc = http_response_send_head(fd, 200, file.content_type, file.size, &extra);
-    if (rc == 0) {
-        rc = static_file_send_body(fd, &file);
-    }
-    /* 성공한 close도 errno를 바꿀 수 있으므로 원래 실패 이유를 되돌린다. 다 보낸 뒤의 close 실패는 무시한다. */
-    err = errno;
-    close(file.fd);
-    errno = err;
-    return rc;
+    return would_block(errno) ? wait_for(c, WAIT_READ) : finish(c, HTTP_CONN_ERROR, errno);
 }
 
 /* D-48 순서 1~7의 결과 → 상태 코드. 모두 닫는 코드다(D-37). */
@@ -168,98 +138,297 @@ static int wants_continue(const http_request *req)
            strcasecmp(expect, "100-continue") == 0;
 }
 
-http_conn_result http_conn_serve(int fd, const char *root)
+/* 상태 응답(머리 + 본문)으로 출력을 채운다. */
+static int fill_status(http_conn *c, int status, const http_response_extra *extra, long long now)
 {
-    char buffer[HTTP_REQUEST_HEAD_MAX]; /* D-47: 맨 앞은 항상 아직 처리하지 않은 요청의 시작이다 */
-    http_request request;
-    size_t len = 0;
-
-    if (set_timeout(fd, SO_RCVTIMEO, HTTP_CONN_TIMEOUT_USEC) != 0 ||
-        set_timeout(fd, SO_SNDTIMEO, HTTP_CONN_TIMEOUT_USEC) != 0) {
-        return HTTP_CONN_ERROR;
+    int n = http_response_format_status(c->out, sizeof(c->out), status, extra);
+    if (n < 0) {
+        return finish(c, HTTP_CONN_ERROR, errno);
     }
-    for (;;) {
-        http_parse_result result = len > 0 ? http_parse_request(buffer, len, &request) : HTTP_PARSE_INCOMPLETE;
+    filled(c, (size_t)n, now);
+    c->state = ST_RESPONDED;
+    return CONTINUE;
+}
+
+/* 완성된 머리: 유지 여부(D-51)와 본문 위치(D-47)를 정하고 필요하면 100을 채운다(D-50). */
+static int start_request(http_conn *c, long long now)
+{
+    int keep = http_request_keep_alive(&c->req);
+    size_t in_buffer = c->in_len - c->req.head_len;
+
+    c->conn_hdr = !keep ? HTTP_CONNECTION_CLOSE
+                  : c->req.version_minor == 0 ? HTTP_CONNECTION_KEEP_ALIVE
+                                              : HTTP_CONNECTION_NONE;
+    c->close_after = keep ? 0 : 1;
+    if (in_buffer > c->req.content_length) {
+        in_buffer = c->req.content_length;
+    }
+    c->body_buffered = in_buffer;
+    c->body_left = c->req.content_length - in_buffer;
+    c->echo = strcmp(c->req.method, "POST") == 0 && is_echo(c->req.target);
+    c->state = ST_BODY_START;
+    if (wants_continue(&c->req)) {
+        int n = http_response_format_continue(c->out, sizeof(c->out));
+        if (n < 0) {
+            return finish(c, HTTP_CONN_ERROR, errno);
+        }
+        filled(c, (size_t)n, now);
+    }
+    return CONTINUE;
+}
+
+static int on_head(http_conn *c, turn *t, long long now)
+{
+    http_parse_result result = c->in_len > 0 ? http_parse_request(c->in, c->in_len, &c->req) : HTTP_PARSE_INCOMPLETE;
+    ssize_t n;
+
+    if (result == HTTP_PARSE_OK) {
+        return start_request(c, now);
+    }
+    if (result != HTTP_PARSE_INCOMPLETE) {
         http_response_extra extra = {NULL, NULL, HTTP_CONNECTION_CLOSE};
-        size_t in_buffer, remaining;
-        http_conn_result r;
-        int keep, rc = 0, is_post;
+        c->close_after = 2;
+        return fill_status(c, error_status(result), &extra, now);
+    }
+    /* 파서는 in_len < HTTP_REQUEST_HEAD_MAX에서만 INCOMPLETE를 돌려주므로 남은 칸은 항상 1 이상이다(D-14, D-17). */
+    if (t->did_read) {
+        return wait_for(c, c->in_len == 0 ? WAIT_IDLE : WAIT_READ);
+    }
+    t->did_read = 1;
+    n = read(c->fd, c->in + c->in_len, sizeof(c->in) - c->in_len);
+    if (n > 0) {
+        c->in_len += (size_t)n;
+        c->deadline = now + HTTP_CONN_TIMEOUT_NS;
+        return CONTINUE;
+    }
+    if (c->in_len == 0) { /* 요청 사이(D-53 1행) */
+        if (n < 0 && would_block(errno)) {
+            return wait_for(c, WAIT_IDLE);
+        }
+        if (n == 0 || errno == ECONNRESET) {
+            return finish(c, HTTP_CONN_DONE, n == 0 ? 0 : errno);
+        }
+    }
+    return mid_request_failure(c, n);
+}
 
-        /* 파서는 len < HTTP_REQUEST_HEAD_MAX에서만 INCOMPLETE를 돌려주므로 남은 칸은 항상 1 이상이다(D-14, D-17). */
-        while (result == HTTP_PARSE_INCOMPLETE) {
-            ssize_t n = read_once(fd, buffer + len, sizeof(buffer) - len);
-            if (n <= 0) {
-                if (len == 0 && (n == 0 || timed_out() || errno == ECONNRESET)) {
-                    return HTTP_CONN_DONE; /* 요청 사이(D-53 1행) */
-                }
-                return mid_request_failure(n);
-            }
-            len += (size_t)n;
-            result = http_parse_request(buffer, len, &request);
-        }
-        if (result != HTTP_PARSE_OK) {
-            if (http_response_send_status(fd, error_status(result), &extra) != 0) {
-                return HTTP_CONN_ERROR;
-            }
-            drain_before_close(fd, buffer, sizeof(buffer));
-            return HTTP_CONN_DONE;
-        }
+/* 본문 단계 시작. /echo만 머리 + 버퍼 속 본문을 먼저 채운다(D-39, D-50). 그 밖은 본문을 버린 뒤 응답한다. */
+static int on_body_start(http_conn *c, turn *t, long long now)
+{
+    size_t used = c->req.head_len + c->body_buffered;
 
-        /* D-51: 응답 머리를 쓰기 전에 유지 여부를 한 번 정한다. */
-        keep = http_request_keep_alive(&request);
-        extra.connection = !keep ? HTTP_CONNECTION_CLOSE
-                           : request.version_minor == 0 ? HTTP_CONNECTION_KEEP_ALIVE
-                                                         : HTTP_CONNECTION_NONE;
-        in_buffer = len - request.head_len;
-        if (in_buffer > request.content_length) {
-            in_buffer = request.content_length;
+    (void)t;
+    if (c->echo) {
+        http_response_extra extra = {NULL, NULL, c->conn_hdr};
+        int n = http_response_format_head(c->out, sizeof(c->out), 200, "application/octet-stream",
+                                          c->req.content_length, &extra);
+        if (n < 0) {
+            return finish(c, HTTP_CONN_ERROR, errno);
         }
-        remaining = request.content_length - in_buffer;
-        if (wants_continue(&request) && http_response_send_continue(fd) != 0) {
-            return HTTP_CONN_ERROR;
-        }
+        memcpy(c->out + n, c->in + c->req.head_len, c->body_buffered);
+        filled(c, (size_t)n + c->body_buffered, now);
+        c->state = ST_ECHO;
+    } else {
+        c->state = ST_DISCARD;
+    }
+    consume(c, used); /* 본문 일부만 버퍼에 있었다면 남는 바이트는 없다(D-47) */
+    return CONTINUE;
+}
 
-        is_post = strcmp(request.method, "POST") == 0;
-        if (is_post && is_echo(request.target)) {
-            /* /echo만 머리를 먼저 보내고 본문을 조각으로 돌려준다(D-39, D-50). 그 뒤 실패는 연결만 닫는다. */
-            if (http_response_send_head(fd, 200, "application/octet-stream", request.content_length, &extra) != 0 ||
-                io_write_all(fd, buffer + request.head_len, in_buffer) != 0) {
-                return HTTP_CONN_ERROR;
-            }
-            r = pump_body(fd, buffer, sizeof(buffer), remaining, 1);
-            if (r != HTTP_CONN_DONE) {
-                return r;
-            }
-        } else {
-            /* 나머지는 본문을 다 읽어 버린 뒤 판정·응답한다(D-50). 버퍼를 다시 써도 request는 복사본이라 안전하다. */
-            r = pump_body(fd, buffer, sizeof(buffer), remaining, 0);
-            if (r != HTTP_CONN_DONE) {
-                return r;
-            }
-            if (is_post || is_echo(request.target)) {
-                extra.allow = is_post ? "GET" : "POST"; /* D-36 */
-                rc = http_response_send_status(fd, 405, &extra);
-            } else {
-                rc = serve_file(fd, root, request.target, extra.connection);
-            }
-            if (rc < 0) {
-                return HTTP_CONN_ERROR;
-            }
-            if (rc == 1) {
-                drain_before_close(fd, buffer, sizeof(buffer));
-                return HTTP_CONN_DONE;
-            }
+/* /echo 본문 조각: 소켓에서 빈 출력 버퍼로 바로 읽어 되돌린다. 머리를 보낸 뒤 실패는 연결만 닫는다(D-51). */
+static int on_echo(http_conn *c, turn *t, long long now)
+{
+    size_t want = c->body_left < sizeof(c->out) ? c->body_left : sizeof(c->out);
+    ssize_t n;
+
+    if (c->body_left == 0) {
+        c->state = ST_RESPONDED;
+        return CONTINUE;
+    }
+    if (t->did_read) {
+        return wait_for(c, WAIT_READ);
+    }
+    t->did_read = 1;
+    n = read(c->fd, c->out, want);
+    if (n <= 0) {
+        return mid_request_failure(c, n);
+    }
+    c->body_left -= (size_t)n;
+    filled(c, (size_t)n, now); /* 성공한 read이자 출력 채움: 둘 다 now부터 */
+    return CONTINUE;
+}
+
+/* 판정 결과(D-26 3·4단계)로 최종 응답을 채운다. 200이면 머리를 채우고 파일 조각 단계로 간다. */
+static int respond(http_conn *c, long long now)
+{
+    http_response_extra extra = {NULL, NULL, c->conn_hdr};
+    int is_post = strcmp(c->req.method, "POST") == 0, n;
+    static_file file;
+
+    if (is_post || is_echo(c->req.target)) {
+        extra.allow = is_post ? "GET" : "POST"; /* D-36 */
+        return fill_status(c, 405, &extra, now);
+    }
+    switch (static_file_open(c->root, c->req.target, &file)) {
+    case STATIC_FILE_OK: break;
+    case STATIC_FILE_REDIRECT:
+        extra.location = file.location;
+        return fill_status(c, 301, &extra, now);
+    case STATIC_FILE_BAD_TARGET:
+        extra.connection = HTTP_CONNECTION_CLOSE; /* D-51: 정적 판정 400도 닫고 정리한다 */
+        c->close_after = 2;
+        return fill_status(c, 400, &extra, now);
+    case STATIC_FILE_FORBIDDEN: return fill_status(c, 403, &extra, now);
+    case STATIC_FILE_NOT_FOUND: return fill_status(c, 404, &extra, now);
+    case STATIC_FILE_ERROR:
+    default: return fill_status(c, 500, &extra, now);
+    }
+    c->file_fd = file.fd; /* 여기부터 파일 fd는 연결이 가진다(release가 닫는다) */
+    c->file_left = file.size;
+    n = http_response_format_head(c->out, sizeof(c->out), 200, file.content_type, file.size, &extra);
+    if (n < 0) {
+        return finish(c, HTTP_CONN_ERROR, errno);
+    }
+    filled(c, (size_t)n, now);
+    c->state = ST_FILE;
+    return CONTINUE;
+}
+
+/* 버릴 본문을 남은 길이만큼만 읽는다(D-39, D-47). 이때 in은 비어 있어 읽기 자리로 쓴다. */
+static int on_discard(http_conn *c, turn *t, long long now)
+{
+    ssize_t n;
+
+    if (c->body_left == 0) {
+        return respond(c, now);
+    }
+    if (t->did_read) {
+        return wait_for(c, WAIT_READ);
+    }
+    t->did_read = 1;
+    n = read(c->fd, c->in, c->body_left < sizeof(c->in) ? c->body_left : sizeof(c->in));
+    if (n <= 0) {
+        return mid_request_failure(c, n);
+    }
+    c->body_left -= (size_t)n;
+    c->deadline = now + HTTP_CONN_TIMEOUT_NS;
+    return CONTINUE;
+}
+
+/* 파일 조각 하나를 빈 출력 버퍼에 채운다. 원래 크기를 넘게 보내지 않고, 일찍 끝나면 EIO(D-29). */
+static int on_file(http_conn *c, turn *t, long long now)
+{
+    ssize_t n;
+
+    if (c->file_left == 0) {
+        close(c->file_fd); /* 다 보낸 뒤의 close 실패는 무시한다 */
+        c->file_fd = -1;
+        c->state = ST_RESPONDED;
+        return CONTINUE;
+    }
+    if (t->did_fill) {
+        return HTTP_CONN_RUNNABLE;
+    }
+    t->did_fill = 1;
+    n = static_file_read_chunk(c->file_fd, c->out, c->file_left < sizeof(c->out) ? c->file_left : sizeof(c->out));
+    if (n < 0) {
+        return finish(c, HTTP_CONN_ERROR, errno);
+    }
+    c->file_left -= (size_t)n;
+    filled(c, (size_t)n, now);
+    return CONTINUE;
+}
+
+/* 응답을 다 보냈다: 유지면 다음 요청, 닫기면 끝, 닫는 코드면 shutdown 한 번 뒤 정리(D-51, D-54). */
+static int on_responded(http_conn *c, turn *t, long long now)
+{
+    (void)t;
+    if (c->close_after == 1) {
+        return finish(c, HTTP_CONN_DONE, 0); /* 본문을 다 읽었으므로 정리 없이 닫는다 */
+    }
+    if (c->close_after == 2) {
+        if (shutdown(c->fd, SHUT_WR) != 0) {
+            return finish(c, HTTP_CONN_DONE, 0);
         }
-        if (!keep) {
-            return HTTP_CONN_DONE; /* 본문을 다 읽었으므로 정리 없이 닫는다(D-54) */
+        c->deadline = now + HTTP_CONN_TIMEOUT_NS; /* 정리 마감은 여기서 고정한다(D-59) */
+        c->state = ST_DRAIN;
+        return CONTINUE;
+    }
+    c->state = ST_HEAD;
+    return CONTINUE;
+}
+
+/* 닫기 전 정리: 상대가 닫음·읽기 오류·고정 마감 중 먼저 오는 때까지 읽어 버린다. 마감 뒤에는 새로 읽지 않는다. */
+static int on_drain(http_conn *c, turn *t, long long now)
+{
+    ssize_t n;
+
+    if (now >= c->deadline) {
+        return finish(c, HTTP_CONN_DONE, 0);
+    }
+    if (t->did_read) {
+        return wait_for(c, WAIT_DRAIN);
+    }
+    t->did_read = 1;
+    n = read(c->fd, c->in, sizeof(c->in));
+    if (n > 0) {
+        return CONTINUE; /* 정리 중 읽기는 마감을 늘리지 않는다 */
+    }
+    if (n < 0 && would_block(errno)) {
+        return wait_for(c, WAIT_DRAIN);
+    }
+    return finish(c, HTTP_CONN_DONE, 0); /* 상대가 닫음, ECONNRESET 등 모든 읽기 오류 */
+}
+
+static const state_fn handlers[] = {on_head, on_body_start, on_echo, on_discard, on_file, on_responded, on_drain};
+
+void http_conn_init(http_conn *c, int fd, const char *root, long long now)
+{
+    c->fd = fd;
+    c->root = root;
+    c->state = ST_HEAD;
+    c->wait = WAIT_IDLE;
+    c->deadline = now + HTTP_CONN_TIMEOUT_NS;
+    c->result = HTTP_CONN_DONE;
+    c->err = 0;
+    c->in_len = 0;
+    c->close_after = 0;
+    c->body_buffered = c->body_left = 0;
+    c->file_fd = -1;
+    c->file_left = 0;
+    c->out_pos = c->out_len = 0;
+}
+
+http_conn_step http_conn_run(http_conn *c, long long now)
+{
+    turn t = {0, 0, c->out_len - c->out_pos};
+
+    for (;;) {
+        int r = c->out_pos < c->out_len ? flush(c, &t, now) : handlers[c->state](c, &t, now);
+        if (r != CONTINUE) {
+            return (http_conn_step)r;
         }
-        /* D-47: 본문 일부만 버퍼에 있었다면 나머지는 소켓에서 읽었으므로 버퍼에 다음 요청 바이트가 없다. */
-        if (remaining > 0) {
-            len = 0;
-        } else {
-            size_t used = request.head_len + request.content_length;
-            memmove(buffer, buffer + used, len - used);
-            len -= used;
-        }
+    }
+}
+
+int http_conn_expired(const http_conn *c, long long now)
+{
+    return now >= c->deadline;
+}
+
+void http_conn_expire(http_conn *c)
+{
+    switch (c->wait) {
+    case WAIT_READ: finish(c, HTTP_CONN_TIMED_OUT, EAGAIN); break;
+    case WAIT_WRITE: finish(c, HTTP_CONN_ERROR, EAGAIN); break;
+    default: finish(c, HTTP_CONN_DONE, 0); break; /* 요청 사이·정리 */
+    }
+}
+
+void http_conn_release(http_conn *c)
+{
+    if (c->file_fd >= 0) {
+        close(c->file_fd);
+        c->file_fd = -1;
     }
 }

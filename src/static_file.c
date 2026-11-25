@@ -167,25 +167,28 @@ static_file_result static_file_open(const char *root, const char *target, static
     return STATIC_FILE_OK;
 }
 
+ssize_t static_file_read_chunk(int fd, void *buf, size_t want)
+{
+    ssize_t n;
+
+    do {
+        n = read(fd, buf, want);
+    } while (n < 0 && errno == EINTR);
+    if (n == 0) {
+        errno = EIO; /* size에 닿기 전에 파일 끝: 전송 중 파일이 줄었다(D-29) */
+        return -1;
+    }
+    return n;
+}
+
 int static_file_send_body(int out_fd, const static_file *file)
 {
     char buffer[STATIC_FILE_CHUNK];
     size_t left = file->size;
 
     while (left > 0) {
-        size_t want = left < sizeof(buffer) ? left : sizeof(buffer);
-        ssize_t n = read(file->fd, buffer, want);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return -1;
-        }
-        if (n == 0) {
-            errno = EIO; /* size에 닿기 전에 파일 끝: 전송 중 파일이 줄었다(D-29) */
-            return -1;
-        }
-        if (io_write_all(out_fd, buffer, (size_t)n) != 0) {
+        ssize_t n = static_file_read_chunk(file->fd, buffer, left < sizeof(buffer) ? left : sizeof(buffer));
+        if (n < 0 || io_write_all(out_fd, buffer, (size_t)n) != 0) {
             return -1;
         }
         left -= (size_t)n; /* 파일이 커져도 want 이하만 읽으므로 size까지만 보낸다 */

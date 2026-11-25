@@ -393,6 +393,31 @@ static void test_send_body(void)
     free(got);
 }
 
+/* TC-5-10 보조(D-58): 파일 조각 하나 읽기. want 이하만 읽고, 남은 길이가 있는데 파일 끝이면 -1(EIO). */
+static void test_read_chunk(void)
+{
+    char p[PATH_MAX], buf[64], want6[6];
+    ssize_t a, b, c;
+    int fd, err, fdp;
+
+    path_in(p, root, "a.txt");
+    fdp = open(p, O_RDONLY);
+    setup_or_die(fdp >= 0 && read(fdp, want6, sizeof(want6)) == (ssize_t)sizeof(want6), "a.txt 내용");
+    close(fdp);
+    fd = open(p, O_RDONLY);
+    setup_or_die(fd >= 0, "open a.txt");
+    a = static_file_read_chunk(fd, buf, 4);
+    b = static_file_read_chunk(fd, buf + 4, sizeof(buf) - 4);
+    errno = 0;
+    c = static_file_read_chunk(fd, buf + 6, 10);
+    err = errno;
+    check("read_chunk want 4 → 4바이트", a == 4, "길이가 다르다");
+    check("read_chunk 남은 2바이트만 → 2, 내용 일치", b == 2 && memcmp(buf, want6, 6) == 0, "다르다");
+    check("read_chunk 파일 끝(남은 길이 있음) → -1, errno EIO", c == -1 && err == EIO, strerror(err));
+    check("read_chunk 파일 fd를 닫지 않음", fcntl(fd, F_GETFD) != -1, "닫혔다");
+    close(fd);
+}
+
 int main(void)
 {
     alarm(10); /* FIFO 등에서 멈추면 끝없이 기다리지 않게 한다 */
@@ -402,6 +427,7 @@ int main(void)
     test_open_rules();
     test_within_root();
     test_send_body();
+    test_read_chunk();
     remove_tree();
 
     if (skipped > 0) {

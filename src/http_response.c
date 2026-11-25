@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 static const char *reason_phrase(int status)
@@ -38,12 +39,12 @@ static const char *connection_line(http_connection connection)
     }
 }
 
-int http_response_send_head(int fd, int status, const char *content_type,
-                            size_t content_length, const http_response_extra *extra)
+int http_response_format_head(char *buf, size_t cap, int status, const char *content_type,
+                              size_t content_length, const http_response_extra *extra)
 {
     static const http_response_extra none = {NULL, NULL, HTTP_CONNECTION_NONE};
     const char *reason = reason_phrase(status), *location, *allow, *connection;
-    char date[64], head[512 + PATH_MAX]; /* 고정 부분 512바이트 + Location 값 PATH_MAX바이트(D-27) */
+    char date[64];
     struct tm tm;
     time_t now;
     int n;
@@ -65,7 +66,7 @@ int http_response_send_head(int fd, int status, const char *content_type,
         strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S GMT", &tm) == 0) {
         return -1;
     }
-    n = snprintf(head, sizeof(head),
+    n = snprintf(buf, cap,
                  "HTTP/1.1 %d %s\r\n"
                  "Date: %s\r\n"
                  "Content-Type: %s\r\n"
@@ -77,11 +78,55 @@ int http_response_send_head(int fd, int status, const char *content_type,
                  status, reason, date, content_type, content_length,
                  location ? "Location: " : "", location ? location : "", location ? "\r\n" : "",
                  allow ? "Allow: " : "", allow ? allow : "", allow ? "\r\n" : "", connection);
-    if (n < 0 || (size_t)n >= sizeof(head)) {
-        errno = EINVAL; /* content_type, location, allow가 지나치게 길다 */
+    if (n < 0 || (size_t)n >= cap) {
+        errno = EINVAL; /* content_type, location, allow가 지나치게 길거나 cap이 모자라다 */
         return -1;
     }
-    return io_write_all(fd, head, (size_t)n);
+    return n;
+}
+
+int http_response_format_status(char *buf, size_t cap, int status, const http_response_extra *extra)
+{
+    const char *reason = reason_phrase(status);
+    char body[64];
+    int n, head;
+
+    if (reason == NULL || status == 200) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* 본문과 Content-Length가 같은 n에서 나온다(D-33). */
+    n = snprintf(body, sizeof(body), "%d %s\n", status, reason);
+    head = http_response_format_head(buf, cap, status, "text/plain; charset=utf-8", (size_t)n, extra);
+    if (head < 0) {
+        return -1;
+    }
+    if ((size_t)head + (size_t)n > cap) {
+        errno = EINVAL;
+        return -1;
+    }
+    memcpy(buf + head, body, (size_t)n);
+    return head + n;
+}
+
+int http_response_format_continue(char *buf, size_t cap)
+{
+    static const char line[] = "HTTP/1.1 100 Continue\r\n\r\n";
+
+    if (cap < sizeof(line) - 1) {
+        errno = EINVAL;
+        return -1;
+    }
+    memcpy(buf, line, sizeof(line) - 1);
+    return (int)(sizeof(line) - 1);
+}
+
+int http_response_send_head(int fd, int status, const char *content_type,
+                            size_t content_length, const http_response_extra *extra)
+{
+    char head[512 + PATH_MAX]; /* 고정 부분 512바이트 + Location 값 PATH_MAX바이트(D-27) */
+    int n = http_response_format_head(head, sizeof(head), status, content_type, content_length, extra);
+    return n < 0 ? -1 : io_write_all(fd, head, (size_t)n);
 }
 
 int http_response_send(int fd, int status, const char *content_type,
@@ -99,24 +144,14 @@ int http_response_send(int fd, int status, const char *content_type,
 
 int http_response_send_status(int fd, int status, const http_response_extra *extra)
 {
-    const char *reason = reason_phrase(status);
-    char body[64];
-    int n;
-
-    if (reason == NULL || status == 200) {
-        errno = EINVAL;
-        return -1;
-    }
-    /* 본문과 Content-Length가 같은 n에서 나온다(D-33). */
-    n = snprintf(body, sizeof(body), "%d %s\n", status, reason);
-    if (http_response_send_head(fd, status, "text/plain; charset=utf-8", (size_t)n, extra) != 0) {
-        return -1;
-    }
-    return io_write_all(fd, body, (size_t)n);
+    char out[512 + PATH_MAX + 64]; /* 머리(D-27) + 상태 본문 */
+    int n = http_response_format_status(out, sizeof(out), status, extra);
+    return n < 0 ? -1 : io_write_all(fd, out, (size_t)n);
 }
 
 int http_response_send_continue(int fd)
 {
-    static const char line[] = "HTTP/1.1 100 Continue\r\n\r\n";
-    return io_write_all(fd, line, sizeof(line) - 1);
+    char line[32];
+    int n = http_response_format_continue(line, sizeof(line));
+    return n < 0 ? -1 : io_write_all(fd, line, (size_t)n);
 }

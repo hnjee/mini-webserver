@@ -13,8 +13,8 @@
 | [Step 1](./steps/step-1-echo/README.md) | ✅ 통과 | 2026-11-23 | TC-1-01~10 독립 실행 통과, 단위 검사 29개. 부분 `write`·`EINTR`는 시험이 아닌 코드 검토. |
 | [Step 2](./steps/step-2-http-parse/README.md) | ✅ 통과 | 2026-11-23 | TC-2-01~11 독립 실행 통과, 단위 검사 156개(전체 `make test`). 30만 건 참조 모델 비교 불일치 0. 부분 `write`·`EINTR`·`read` 오류 경로는 시험이 아닌 코드 검토. |
 | [Step 3](./steps/step-3-static/README.md) | ✅ 통과 | 2026-11-23 | TC-3-01~19 독립 실행 통과(Mavuika, 최종 소스 해시 일치), 단위 검사 412건(전체 `make test`, ASan, 비root), 빌드 경고 0건. 변이 시험 23개 중 18개를 시험이 잡았고 나머지는 주입 시험·설계상 이중 방어로 확인. 머리 전송 뒤 실패 경로는 `read`·`close` 주입 시험으로 확인. 스크린샷은 눈으로 판정하지 못하고 DOM 계산 스타일·JS 실행·이미지 크기로 판정. |
-| [Step 4](./steps/step-4-post-keepalive/README.md) | ⬜ | - | - |
-| [Step 5](./steps/step-5-concurrency/README.md) | ⬜ | - | - |
+| [Step 4](./steps/step-4-post-keepalive/README.md) | ✅ 통과 | 2026-11-25 | 이전 독립 재확인: TC-4-01~36 통과, `make test` 675 ok줄·실패 0, 결함 주입 7개 검출. |
+| [Step 5](./steps/step-5-concurrency/README.md) | ✅ 통과 | 2026-11-25 | Ubuntu 독립 ASan 빌드·단위 ok 742줄/실패 0; `nc` 중 `curl` 200; `ab -n 2000 -c 50` 실패 0·5,191.97 req/s. TC-5-08은 이전 22개 기능 ID 재사용·TC-4-17 대체·TC-3-01 Chrome 신규 실행으로 현행 기능 24개 ID 확인. |
 | [Step 6](./steps/step-6-reverse-proxy/README.md) | ⬜ | - | - |
 | [Step 7](./steps/step-7-robustness/README.md) | ⬜ | - | - |
 | [Step 8](./steps/step-8-final/README.md) | ⬜ | - | - |
@@ -25,9 +25,9 @@
 
 | 기준 | 값 | 근거 |
 | ---- | -- | ---- |
-| 동시성 방식 | | [Step 5 결정](./steps/step-5-concurrency/decision.md) |
+| 동시성 방식 | I/O 멀티플렉싱 (`epoll` 구현) | [Step 5 결정](./steps/step-5-concurrency/decision.md) |
 | Step 1~5 통과 (화요일) | | |
-| 부하 `ab` (Requests/sec, 실패 수) | | [Step 5](./steps/step-5-concurrency/README.md) |
+| 부하 `ab` (Requests/sec, 실패 수) | 독립 ASan: 5,191.97 req/s, 실패 0; 자체 -O2: 5,887.24 req/s, 실패 0 (최종 실행) | [Step 5](./steps/step-5-concurrency/README.md) |
 | 부하 `wrk` | | [Step 8](./steps/step-8-final/README.md) |
 | Step 6~7 통과 (수요일) | | |
 | 메모리 검사 | | [Step 7](./steps/step-7-robustness/README.md) |

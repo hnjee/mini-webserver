@@ -4,6 +4,7 @@
 /* PATH_MAX는 기능 매크로(_POSIX_C_SOURCE 등)가 있어야 정의된다. 포함하는 파일은 그 매크로를 먼저 둔다(설계 재검토 I1). */
 #include <limits.h>
 #include <stddef.h>
+#include <sys/types.h>
 
 #define STATIC_FILE_CHUNK 65536 /* D-22 */
 
@@ -38,5 +39,11 @@ int static_file_within_root(const char *root, const char *resolved);
  * 성공 0, 실패 -1(errno 보존. size에 닿기 전에 파일 끝이면 errno = EIO). fd는 둘 다 닫지 않는다.
  */
 int static_file_send_body(int out_fd, const static_file *file);
+
+/*
+ * D-58: 파일 fd에서 want(> 0)바이트 이하를 한 번 읽는다(EINTR은 다시 읽는다). 읽은 바이트 수를 돌려준다.
+ * 호출자는 보낼 길이가 남았을 때만 부르므로 파일 끝이면 -1(errno = EIO, D-29). 읽기 실패도 -1(errno 보존).
+ */
+ssize_t static_file_read_chunk(int fd, void *buf, size_t want);
 
 #endif /* STATIC_FILE_H */

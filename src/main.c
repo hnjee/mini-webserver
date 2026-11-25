@@ -1,41 +1,20 @@
 /*
- * Step 4: POST 본문 + keep-alive.
- * 인자를 확인하고 루트를 정규화하고 듣는 소켓을 연 뒤, 연결을 하나씩 받아 http_conn에 맡기고 닫는다(D-46).
+ * Step 5: 동시성(I/O 멀티플렉싱, D-55).
+ * 인자를 확인하고 루트를 정규화하고 듣는 소켓을 연 뒤, 연결 처리는 epoll 루프에 맡긴다(D-56, D-57).
  * 서버는 Ctrl+C(기본 동작)로만 끝난다. 정상 종료 처리는 Step 7이다.
  */
-#define _DEFAULT_SOURCE /* accept(2)의 ENONET 등 Linux 오류 코드, realpath */
+#define _DEFAULT_SOURCE /* realpath */
 
-#include "http_conn.h"
 #include "listener.h"
 #include "options.h"
+#include "server_loop.h"
 
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <unistd.h>
-
-/* D-07: 일시적인 accept 실패(Linux accept(2)가 재시도를 권하는 오류)인가. */
-static int accept_retryable(int err)
-{
-    switch (err) {
-    case EINTR:
-    case ECONNABORTED:
-    case EPROTO:
-    case ENETDOWN:
-    case ENOPROTOOPT:
-    case EHOSTDOWN:
-    case ENONET:
-    case EHOSTUNREACH:
-    case EOPNOTSUPP:
-    case ENETUNREACH:
-        return 1;
-    default:
-        return 0;
-    }
-}
 
 int main(int argc, char *argv[])
 {
@@ -74,20 +53,8 @@ int main(int argc, char *argv[])
     printf("HTTP 서버 시작: 0.0.0.0:%d, 루트 %s. Ctrl+C로 종료\n", config.port, root);
     fflush(stdout);
 
-    /* 한 번에 한 연결씩 처리한다. 동시성은 Step 5다. */
-    for (;;) {
-        int conn_fd = accept(listen_fd, NULL, NULL);
-        if (conn_fd < 0) {
-            if (accept_retryable(errno)) {
-                continue;
-            }
-            fprintf(stderr, "오류: accept 실패: %s\n", strerror(errno));
-            close(listen_fd);
-            return EXIT_FAILURE;
-        }
-        if (http_conn_serve(conn_fd, root) == HTTP_CONN_ERROR) {
-            fprintf(stderr, "연결 오류로 닫음: %s\n", strerror(errno));
-        }
-        close(conn_fd);
-    }
+    server_loop_run(listen_fd, root, error, sizeof(error)); /* 서버를 끝내는 실패에서만 돌아온다 */
+    fprintf(stderr, "오류: %s\n", error);
+    close(listen_fd);
+    return EXIT_FAILURE;
 }

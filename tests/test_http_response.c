@@ -1,4 +1,4 @@
-/* Step 2·3·4 단위 테스트: http_response를 socketpair로 시험한다(TC-2-05, TC-2-06, TC-3-09, TC-4-15). */
+/* Step 2~5 단위 테스트: http_response를 socketpair로 시험한다(TC-2-05, TC-2-06, TC-3-09, TC-4-15, TC-5-07). */
 #define _POSIX_C_SOURCE 200809L
 
 #include "../src/http_response.h"
@@ -530,11 +530,87 @@ static void test_continue(void)
     check("TC-4-15 100 쓰기 실패 -1, errno EPIPE", rc == -1 && err == EPIPE, strerror(err));
 }
 
+/* ---- TC-5-07: 버퍼에 쓰는 함수가 send_*와 같은 바이트를 만든다(D-58) ---- */
+
+typedef struct {
+    const char *name;
+    int kind; /* 0 head, 1 status, 2 continue */
+    call_args a;
+} format_case;
+
+/* 같은 인자로 format_*과 send_*를 부른다. Date가 초 경계를 넘으면 다를 수 있어 세 번까지 다시 해 본다. */
+static void compare_format_send(const format_case *c)
+{
+    static char sent[2 * PATH_MAX + 1024], formatted[2 * PATH_MAX + 1024];
+    static const writer_fn senders[] = {call_send_head, call_send_status, call_continue};
+    char label[160];
+    size_t sent_len = 0;
+    int rc_send = 0, rc_fmt = 0, err_send = 0, err_fmt = 0, attempt, same = 0;
+
+    for (attempt = 0; attempt < 3 && !same; attempt++) {
+        memset(formatted, '#', sizeof(formatted));
+        errno = 0;
+        rc_fmt = c->kind == 0   ? http_response_format_head(formatted, sizeof(formatted), c->a.status, c->a.ctype,
+                                                            c->a.length, &c->a.extra)
+                 : c->kind == 1 ? http_response_format_status(formatted, sizeof(formatted), c->a.status, &c->a.extra)
+                                : http_response_format_continue(formatted, sizeof(formatted));
+        err_fmt = errno;
+        rc_send = write_round_trip(senders[c->kind], &c->a, sent, sizeof(sent), &sent_len, &err_send);
+        same = rc_send == 0 ? rc_fmt >= 0 && (size_t)rc_fmt == sent_len && memcmp(formatted, sent, sent_len) == 0
+                            : rc_fmt == -1 && err_fmt == err_send && sent_len == 0;
+    }
+    snprintf(label, sizeof(label), "TC-5-07 format = send 바이트: %s", c->name);
+    check(label, same, rc_fmt < 0 ? strerror(err_fmt) : "바이트·길이·반환값이 다르다");
+}
+
+static void test_format_matches_send(void)
+{
+    static char long_location[PATH_MAX + 1];
+    static const format_case base[] = {
+        {"head 200 close", 0, {200, "text/html; charset=utf-8", 12345, {NULL, NULL, HTTP_CONNECTION_CLOSE}}},
+        {"head 200 /echo 유지(Connection 없음)", 0, {200, "application/octet-stream", 5, {NULL, NULL, HTTP_CONNECTION_NONE}}},
+        {"head 200 1.0 keep-alive", 0, {200, "text/css", 0, {NULL, NULL, HTTP_CONNECTION_KEEP_ALIVE}}},
+        {"status 404 유지", 1, {404, NULL, 0, {NULL, NULL, HTTP_CONNECTION_NONE}}},
+        {"status 301 Location", 1, {301, NULL, 0, {"/sub/", NULL, HTTP_CONNECTION_NONE}}},
+        {"status 405 Allow: GET", 1, {405, NULL, 0, {NULL, "GET", HTTP_CONNECTION_KEEP_ALIVE}}},
+        {"status 413 close", 1, {413, NULL, 0, {NULL, NULL, HTTP_CONNECTION_CLOSE}}},
+        {"status 431 close", 1, {431, NULL, 0, {NULL, NULL, HTTP_CONNECTION_CLOSE}}},
+        {"100 Continue", 2, {100, NULL, 0, {NULL, NULL, 0}}},
+        {"계약 위반 status 200 → -1", 1, {200, NULL, 0, {NULL, NULL, 0}}},
+        {"계약 위반 head 405 allow NULL → -1", 0, {405, "text/plain", 1, {NULL, NULL, 0}}},
+        {"계약 위반 head 418 → -1", 0, {418, "text/plain", 1, {NULL, NULL, 0}}},
+    };
+    char small[16];
+    size_t i;
+    int rc, err;
+
+    for (i = 0; i < sizeof(base) / sizeof(base[0]); i++) {
+        compare_format_send(&base[i]);
+    }
+    long_location[0] = '/';
+    memset(long_location + 1, 'a', PATH_MAX - 2);
+    long_location[PATH_MAX - 1] = '/';
+    long_location[PATH_MAX] = '\0';
+    {
+        const format_case c = {"status 301 PATH_MAX Location", 1, {301, NULL, 0, {long_location, NULL, HTTP_CONNECTION_CLOSE}}};
+        compare_format_send(&c);
+    }
+    errno = 0;
+    rc = http_response_format_status(small, sizeof(small), 404, NULL);
+    err = errno;
+    check("TC-5-07 format 버퍼가 모자라면 -1(EINVAL)", rc == -1 && err == EINVAL, "반환값·errno가 다르다");
+    errno = 0;
+    rc = http_response_format_continue(small, 10);
+    err = errno;
+    check("TC-5-07 format_continue 버퍼가 모자라면 -1(EINVAL)", rc == -1 && err == EINVAL, "반환값·errno가 다르다");
+}
+
 int main(void)
 {
     alarm(10); /* 멈추면 끝없이 기다리지 않게 한다 */
     signal(SIGPIPE, SIG_IGN); /* D-05: 서버와 같은 조건 */
-    printf("test_http_response (TC-2-05, TC-2-06, TC-3-09, TC-4-15)\n");
+    printf("test_http_response (TC-2-05, TC-2-06, TC-3-09, TC-4-15, TC-5-07)\n");
+    test_format_matches_send();
     test_statuses();
     test_write_failure();
     test_large_body();

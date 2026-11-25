@@ -1,7 +1,10 @@
 /*
- * Step 2·3·4 단위 테스트: http_conn_serve를 socketpair와 임시 루트로 시험한다
- * (TC-2-07, D-17 보조, TC-3-08, TC-3-10, TC-4-10·19·20·22·24~29).
+ * Step 2~5 단위 테스트: http_conn 상태 구조체를 socketpair와 임시 루트로 시험한다
+ * (TC-2-07, D-17 보조, TC-3-08, TC-3-10, TC-4-10·19·20·22·24~36, TC-5-07·09·10).
+ * Step 4의 http_conn_serve 자리는 시험 쪽 poll 구동 함수 drive()가 맡는다(D-57). 루프와 같은 규칙으로
+ * 준비되면 한 차례 실행, RUNNABLE이면 기다리지 않고 다시 실행, 실행 뒤 기다리는 중이면 마감을 확인한다.
  * 서버는 연결을 유지하므로(D-51) 요청을 다 쓴 뒤 쓰기 방향을 닫아야 돌아온다. 5초를 기다리는 시험은 맨 끝에 자식 프로세스로 함께 돌린다.
+ * TC-5-09·10의 직접 호출 시험은 now를 시험이 정해 넘기고(가짜 시계), 부분 쓰기는 out_pos·out_len 필드로 본다(임시 관찰 지점).
  */
 #define _XOPEN_SOURCE 700 /* mkdtemp·realpath */
 
@@ -11,10 +14,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -123,6 +128,65 @@ static int lowest_free_fd(void)
     return fd;
 }
 
+static long long now_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+static void set_nonblocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL);
+    setup_or_die(flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0, "O_NONBLOCK");
+}
+
+/*
+ * D-57: 시험 쪽 poll 구동 함수. 연결 하나를 끝날 때까지 돌리고 결과를 돌려준다. errno에는 기록된 오류 번호를 둔다.
+ * 루프와 같은 규칙: 준비되면(HUP·ERR 포함) 실행 → RUNNABLE이면 기다리지 않고 다시 실행 → 기다리는 중이면 마감 확인.
+ * 돌아가기 전에 http_conn_release로 파일 fd를 닫는다. 소켓은 닫지 않는다.
+ */
+static http_conn_result drive(int fd, const char *root_dir)
+{
+    http_conn *c = malloc(sizeof(*c));
+    http_conn_step step = HTTP_CONN_WANT_READ;
+    http_conn_result r;
+    int err;
+
+    setup_or_die(c != NULL, "malloc");
+    set_nonblocking(fd);
+    http_conn_init(c, fd, root_dir, now_ns());
+    for (;;) {
+        struct pollfd pfd;
+        long long left = c->deadline - now_ns();
+        int n;
+
+        pfd.fd = fd;
+        pfd.events = step == HTTP_CONN_WANT_WRITE ? POLLOUT : POLLIN;
+        pfd.revents = 0;
+        n = poll(&pfd, 1, left <= 0 ? 0 : (int)((left + 999999) / 1000000));
+        setup_or_die(n >= 0 || errno == EINTR, "poll");
+        if (n > 0) {
+            do {
+                step = http_conn_run(c, now_ns());
+            } while (step == HTTP_CONN_RUNNABLE);
+            if (step == HTTP_CONN_FINISHED) {
+                break;
+            }
+        }
+        if (http_conn_expired(c, now_ns())) {
+            http_conn_expire(c);
+            break;
+        }
+    }
+    r = c->result;
+    err = c->err;
+    http_conn_release(c);
+    free(c);
+    errno = err;
+    return r;
+}
+
 /* base + "/" + rel. 넘치면 준비 실패. */
 static void path_in(char *out, const char *base, const char *rel)
 {
@@ -193,7 +257,7 @@ static http_conn_result serve_prewritten_len(const char *req, size_t len, char *
     setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
     write_all(fds[0], req, len);
     setup_or_die(shutdown(fds[0], SHUT_WR) == 0, "shutdown");
-    r = http_conn_serve(fds[1], root);
+    r = drive(fds[1], root);
     close(fds[1]);
     n = read_all(fds[0], reply, cap);
     close(fds[0]);
@@ -306,7 +370,7 @@ static void test_split_request(void)
     if (pid == 0) {
         http_conn_result r;
         close(fds[0]);
-        r = http_conn_serve(fds[1], root);
+        r = drive(fds[1], root);
         close(fds[1]);
         _exit(r == HTTP_CONN_DONE ? 0 : r == HTTP_CONN_PEER_CLOSED ? 1 : 2);
     }
@@ -336,7 +400,7 @@ static void test_close_mid_head(void)
     setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
     write_all(fds[0], "GET / HTTP/1.1\r\nHo", 18);
     setup_or_die(shutdown(fds[0], SHUT_WR) == 0, "shutdown");
-    r = http_conn_serve(fds[1], root);
+    r = drive(fds[1], root);
     close(fds[1]);
     n = read_all(fds[0], reply, sizeof(reply));
     close(fds[0]);
@@ -442,7 +506,7 @@ static void test_write_failure(void)
     close(fds[0]); /* 요청은 받을 수 있지만 응답 쓰기는 EPIPE가 된다 */
     before = lowest_free_fd();
     errno = 0;
-    r = http_conn_serve(fds[1], root);
+    r = drive(fds[1], root);
     err = errno;
     check("TC-3-08 머리 쓰기 실패 뒤 파일 fd 누수 없음", lowest_free_fd() == before, "열린 fd가 남았다");
     close(fds[1]);
@@ -468,7 +532,7 @@ static void test_big_file(void)
     if (pid == 0) {
         http_conn_result r;
         close(fds[0]);
-        r = http_conn_serve(fds[1], root);
+        r = drive(fds[1], root);
         close(fds[1]);
         _exit(r == HTTP_CONN_DONE ? 0 : 1);
     }
@@ -503,7 +567,7 @@ static void test_close_mid_body(void)
         close(fds[0]);
         before = lowest_free_fd();
         errno = 0;
-        r = http_conn_serve(fds[1], root);
+        r = drive(fds[1], root);
         err = errno;
         leaked = lowest_free_fd() != before;
         close(fds[1]);
@@ -564,7 +628,7 @@ static void test_expect_continue(void)
     if (pid == 0) {
         http_conn_result r;
         close(fds[0]);
-        r = http_conn_serve(fds[1], root);
+        r = drive(fds[1], root);
         close(fds[1]);
         _exit(r == HTTP_CONN_DONE ? 0 : 1);
     }
@@ -662,7 +726,7 @@ static void test_big_echo_then_next(void)
     if (pid == 0) {
         http_conn_result r;
         close(fds[0]);
-        r = http_conn_serve(fds[1], root);
+        r = drive(fds[1], root);
         close(fds[1]);
         _exit(r == HTTP_CONN_DONE ? 0 : 1);
     }
@@ -782,7 +846,7 @@ static pid_t fork_server(int fds[2], int *result_fd)
         close(fds[0]);
         close(p[0]);
         errno = 0;
-        s.result = http_conn_serve(fds[1], root);
+        s.result = drive(fds[1], root);
         s.err = errno;
         close(fds[1]);
         _exit(write(p[1], &s, sizeof(s)) == (ssize_t)sizeof(s) ? 0 : 3);
@@ -922,6 +986,337 @@ static void test_head_exactly_8k(void)
     }
 }
 
+/* ---- Step 5: 연결 상태 구조체를 직접 부르는 시험(가짜 시계) ---- */
+
+#define SEC 1000000000LL
+
+/* 서버 쪽 소켓 하나와 연결 상태. 서버 쪽은 논블로킹, 클라이언트 쪽은 블로킹 그대로다. */
+typedef struct {
+    int client, server;
+    http_conn *c;
+} direct;
+
+static direct direct_open(long long now)
+{
+    direct d;
+    int fds[2];
+
+    setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
+    d.client = fds[0];
+    d.server = fds[1];
+    set_nonblocking(d.server);
+    d.c = malloc(sizeof(*d.c));
+    setup_or_die(d.c != NULL, "malloc");
+    http_conn_init(d.c, d.server, root, now);
+    return d;
+}
+
+static void direct_close(direct *d)
+{
+    http_conn_release(d->c);
+    free(d->c);
+    close(d->server);
+    if (d->client >= 0) {
+        close(d->client);
+    }
+}
+
+/* 기다림 없이 진행할 수 있는 동안(RUNNABLE, 쓸 수 있는 WANT_WRITE) 차례를 반복한다. 최대 max번. */
+static http_conn_step run_ready(http_conn *c, long long now, int max)
+{
+    http_conn_step step = HTTP_CONN_RUNNABLE;
+    int i;
+
+    for (i = 0; i < max; i++) {
+        struct pollfd pfd = {c->fd, POLLOUT, 0};
+        step = http_conn_run(c, now);
+        if (step == HTTP_CONN_RUNNABLE) {
+            continue;
+        }
+        if (step != HTTP_CONN_WANT_WRITE || poll(&pfd, 1, 0) != 1) {
+            break;
+        }
+    }
+    return step;
+}
+
+/* 클라이언트 쪽에 지금 와 있는 바이트를 모두 읽는다(기다리지 않음). */
+static size_t read_available(int fd, char *buf, size_t cap)
+{
+    size_t have = 0;
+    for (;;) {
+        ssize_t n = recv(fd, buf + have, cap - have, MSG_DONTWAIT);
+        if (n <= 0) {
+            return have;
+        }
+        have += (size_t)n;
+        setup_or_die(have < cap, "응답이 테스트 버퍼보다 크다");
+    }
+}
+
+/*
+ * TC-5-09: EOF·추가 송신 없이 한 번에 쓴 요청. 버퍼에 남은 일을 다 처리하기 전에 읽기 대기(WANT_READ)로
+ * 돌아가면 아직 안 나간 응답이 생기므로, 첫 WANT_READ 시점에 클라이언트가 받은 바이트로 판정한다.
+ */
+static void buffered_case(const char *name, const char *req, size_t len, const want_resp *want, size_t n)
+{
+    static char reply[65536];
+    char label[160];
+    direct d = direct_open(0);
+    http_conn_step step;
+    size_t have;
+
+    write_all(d.client, req, len);
+    step = run_ready(d.c, 0, 1000);
+    have = read_available(d.client, reply, sizeof(reply));
+    snprintf(label, sizeof(label), "%s: 연결 유지, 읽기 대기로 멈춤", name);
+    check(label, step == HTTP_CONN_WANT_READ, step == HTTP_CONN_FINISHED ? "끝났다" : "읽기 대기가 아니다");
+    check_replies(name, reply, have, want, n);
+    direct_close(&d);
+}
+
+static void test_buffered_work(void)
+{
+    {
+        const want_resp want[] = {INDEX_200, {"HTTP/1.1 404 Not Found\r\n", S("404 Not Found\n"), NULL, NULL}};
+        buffered_case("TC-5-09 완성 요청 2개 한 번에", S(GET_ROOT "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n"), want, 2);
+    }
+    {
+        const want_resp want[] = {{"HTTP/1.1 100 Continue\r\n", S(""), NULL, NULL}, {"HTTP/1.1 200 OK\r\n", S("hello"), NULL, NULL}};
+        buffered_case("TC-5-09 Expect 요청 + 본문 한 번에",
+                      S("POST /echo HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello"), want, 2);
+    }
+    {
+        static char reply[4096];
+        direct d = direct_open(0);
+        http_conn_step step;
+        size_t have;
+
+        write_all(d.client, S("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc"));
+        step = run_ready(d.c, 0, 1000);
+        have = read_available(d.client, reply, sizeof(reply));
+        check("TC-5-09 /echo 머리 + 본문 일부: 읽기 대기로 멈춤", step == HTTP_CONN_WANT_READ, "읽기 대기가 아니다");
+        check("TC-5-09 /echo 머리 + 본문 일부: 머리(Content-Length: 10)와 abc가 먼저 나감",
+              starts_with(reply, "HTTP/1.1 200 OK\r\n") && find_in(reply, have, "\r\nContent-Length: 10\r\n") != NPOS &&
+                  find_in(reply, have, "\r\n\r\nabc") + 7 == have,
+              "머리·abc가 다 오지 않았다");
+        direct_close(&d);
+    }
+}
+
+/* 연결이 기다리는 중일 때 마감을 확인하고, 지났으면 만료 처리한 뒤 1을 돌려준다(루프의 마감 확인과 같다). */
+static int expire_if_due(http_conn *c, long long now)
+{
+    if (!http_conn_expired(c, now)) {
+        return 0;
+    }
+    http_conn_expire(c);
+    return 1;
+}
+
+/* TC-5-10: 첫 write부터 막힘 → 채운 때부터 5초 뒤 ERROR(EAGAIN). 서버→클라이언트 방향을 미리 가득 채운다. */
+static void deadline_first_write_blocked(void)
+{
+    static char junk[4096];
+    direct d = direct_open(0);
+    http_conn_step step;
+
+    memset(junk, 'j', sizeof(junk));
+    while (write(d.server, junk, sizeof(junk)) > 0) {
+    }
+    setup_or_die(errno == EAGAIN || errno == EWOULDBLOCK, "서버 쪽 송신 공간 채우기");
+    write_all(d.client, S(GET_ROOT));
+    step = run_ready(d.c, 1 * SEC, 10);
+    check("TC-5-10 첫 write부터 막힘: 쓰기 대기, 한 바이트도 못 보냄", step == HTTP_CONN_WANT_WRITE && d.c->out_pos == 0 &&
+                                                                    d.c->out_len > 0,
+          "쓰기 대기가 아니다");
+    check("TC-5-10 첫 write부터 막힘: 채운 때+5초 직전에는 만료 아님", !expire_if_due(d.c, 6 * SEC - 1), "일찍 만료됐다");
+    check("TC-5-10 첫 write부터 막힘: 채운 때+5초에 ERROR(EAGAIN)",
+          expire_if_due(d.c, 6 * SEC) && d.c->result == HTTP_CONN_ERROR && d.c->err == EAGAIN, "결과가 다르다");
+    direct_close(&d);
+}
+
+/* TC-5-10: 100을 보낸 때부터 읽기 마감, 그 뒤 4초마다 1바이트씩 총 40초 넘게 본문 → 최종 응답 405. */
+static void deadline_slow_body_after_continue(void)
+{
+    static char reply[4096];
+    direct d = direct_open(0);
+    http_conn_step step;
+    size_t have;
+    int i, early = 0;
+
+    write_all(d.client, S("POST /x HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 10\r\n\r\n"));
+    step = http_conn_run(d.c, 0); /* 머리를 읽고 100을 채운다(RUNNABLE) */
+    step = http_conn_run(d.c, 1 * SEC); /* 100을 다 보낸 때 = 1초 */
+    have = read_available(d.client, reply, sizeof(reply));
+    check("TC-5-10 100 뒤: 100만 나가고 본문 읽기 대기", step == HTTP_CONN_WANT_READ && have == 25 &&
+                                                       memcmp(reply, "HTTP/1.1 100 Continue\r\n\r\n", 25) == 0,
+          "100·대기가 다르다");
+    check("TC-5-10 100 뒤: 읽기 마감은 100을 보낸 때부터(머리 받은 0초+5초에는 아직 아님)", !expire_if_due(d.c, 5 * SEC + SEC / 2),
+          "머리 받은 때부터 잰다");
+    for (i = 0; i < 10; i++) {
+        long long t = 5 * SEC + SEC / 2 + (long long)i * 4 * SEC; /* 5.5초부터 4초 간격 */
+        early |= expire_if_due(d.c, t);
+        write_all(d.client, "x", 1);
+        step = run_ready(d.c, t, 10);
+    }
+    have = read_available(d.client, reply, sizeof(reply));
+    check("TC-5-10 조금씩 41초 넘게 받아도 진행마다 마감 갱신(만료 없음)", !early, "도중에 만료됐다");
+    check("TC-5-10 본문을 다 받은 뒤 최종 응답 405, 연결 유지",
+          step == HTTP_CONN_WANT_READ && starts_with(reply, "HTTP/1.1 405 Method Not Allowed\r\n") &&
+              response_len(reply, have) == have,
+          "405가 아니다");
+    direct_close(&d);
+}
+
+/* TC-5-10: /echo 출력 막힘(클라이언트가 받아 가지 않음) → 마지막 쓰기 진행+5초에 ERROR(EAGAIN). */
+static void deadline_echo_output_blocked(void)
+{
+    const size_t body_len = HTTP_CONTENT_LENGTH_MAX;
+    char head[128], *body = malloc(body_len);
+    direct d = direct_open(0);
+    http_conn_step step = HTTP_CONN_WANT_READ;
+    struct pollfd pfd;
+    size_t sent = 0;
+    int i, hl;
+
+    setup_or_die(body != NULL, "malloc");
+    memset(body, 'e', body_len);
+    hl = snprintf(head, sizeof(head), "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: %zu\r\n\r\n", body_len);
+    write_all(d.client, head, (size_t)hl);
+    set_nonblocking(d.client);
+    for (i = 0; i < 10000; i++) {
+        ssize_t n = sent < body_len ? write(d.client, body + sent, body_len - sent) : 0;
+        if (n > 0) {
+            sent += (size_t)n;
+        }
+        step = run_ready(d.c, 2 * SEC, 10);
+        pfd.fd = d.server;
+        pfd.events = POLLOUT;
+        if (step == HTTP_CONN_WANT_WRITE && poll(&pfd, 1, 0) == 0) {
+            break;
+        }
+    }
+    check("TC-5-10 /echo 출력 막힘: 본문 도중 쓰기 대기", step == HTTP_CONN_WANT_WRITE && d.c->body_left > 0,
+          "쓰기 대기가 아니다");
+    check("TC-5-10 /echo 출력 막힘: 마지막 진행+5초 직전에는 만료 아님", !expire_if_due(d.c, 7 * SEC - 1), "일찍 만료됐다");
+    check("TC-5-10 /echo 출력 막힘: 마지막 진행+5초에 ERROR(EAGAIN)",
+          expire_if_due(d.c, 7 * SEC) && d.c->result == HTTP_CONN_ERROR && d.c->err == EAGAIN, "결과가 다르다");
+    direct_close(&d);
+    free(body);
+}
+
+/* TC-5-10: /echo 입력 끊김 → 출력을 다 보낸 때+5초에 TIMED_OUT. 진행 없는 준비 알림(3초)은 마감을 늘리지 않는다. */
+static void deadline_echo_input_stalled(void)
+{
+    static char reply[4096];
+    direct d = direct_open(0);
+    http_conn_step step;
+    size_t have;
+
+    write_all(d.client, S("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc"));
+    step = run_ready(d.c, 0, 10);
+    have = read_available(d.client, reply, sizeof(reply));
+    check("TC-5-10 /echo 입력 끊김: 머리+abc 보낸 뒤 읽기 대기", step == HTTP_CONN_WANT_READ &&
+                                                               find_in(reply, have, "\r\n\r\nabc") + 7 == have,
+          "다르다");
+    step = http_conn_run(d.c, 3 * SEC); /* 진행 없는 차례(EAGAIN) */
+    check("TC-5-10 /echo 입력 끊김: 진행 없는 차례 뒤에도 기존 마감(5초) 유지",
+          step == HTTP_CONN_WANT_READ && !expire_if_due(d.c, 5 * SEC - 1) && expire_if_due(d.c, 5 * SEC) &&
+              d.c->result == HTTP_CONN_TIMED_OUT,
+          "마감·결과가 다르다");
+    direct_close(&d);
+}
+
+/* TC-5-10: 부분 쓰기(작은 송신 버퍼) 뒤에도 위치를 기억해 이어 보내 파일 바이트가 같다. */
+static void deadline_partial_write_bytes(void)
+{
+    const size_t cap = BIG_LEN + 4096;
+    char *reply = malloc(cap);
+    direct d = direct_open(0);
+    int small = 4096, partial = 0, i;
+    size_t have = 0;
+    http_conn_step step = HTTP_CONN_WANT_READ;
+
+    setup_or_die(reply != NULL, "malloc");
+    setup_or_die(setsockopt(d.server, SOL_SOCKET, SO_SNDBUF, &small, sizeof(small)) == 0, "SO_SNDBUF");
+    write_all(d.client, S("GET /big.bin HTTP/1.1\r\nHost: x\r\n\r\n"));
+    for (i = 0; i < 100000 && (have == 0 || response_len(reply, have) == 0); i++) {
+        ssize_t n;
+        step = http_conn_run(d.c, 0);
+        if (step == HTTP_CONN_WANT_WRITE && d.c->out_pos > 0 && d.c->out_pos < d.c->out_len) {
+            partial = 1;
+        }
+        n = recv(d.client, reply + have, 1000 < cap - have ? 1000 : cap - have, MSG_DONTWAIT);
+        if (n > 0) {
+            have += (size_t)n;
+        }
+    }
+    check("TC-5-10 부분 쓰기 발생(보낸 위치가 출력 중간)", partial, "부분 쓰기를 보지 못했다");
+    check("TC-5-10 부분 쓰기 뒤 파일 바이트·Content-Length 일치", body_is(reply, have, big_body, BIG_LEN), "본문이 다르다");
+    check("TC-5-10 부분 쓰기 뒤 연결 유지(다음 요청 대기)", step == HTTP_CONN_WANT_READ, "다르다");
+    direct_close(&d);
+    free(reply);
+}
+
+/* TC-5-10: 5초 경계에 이번 배치의 준비 연결 — 실제 진행이 있으면 계속, 없으면 만료. 정리는 마감을 먼저 본다. */
+static void deadline_ready_at_boundary(void)
+{
+    static char reply[4096];
+    direct d;
+    http_conn_step step;
+    size_t have;
+    int avail = -1;
+
+    d = direct_open(0);
+    write_all(d.client, S("GET / HT"));
+    step = run_ready(d.c, 0, 10);
+    write_all(d.client, S("TP/1.1\r\nHost: x\r\n\r\n"));
+    check("TC-5-10 경계 진행: 마감(5초)이 지난 6초에 준비됨", step == HTTP_CONN_WANT_READ && http_conn_expired(d.c, 6 * SEC),
+          "준비 조건이 다르다");
+    step = run_ready(d.c, 6 * SEC, 10); /* 배치 처리가 마감 확인보다 먼저다 */
+    have = read_available(d.client, reply, sizeof(reply));
+    check("TC-5-10 경계 진행: 실제 진행이 있으면 이어 처리(응답, 만료 아님)",
+          step == HTTP_CONN_WANT_READ && !expire_if_due(d.c, 6 * SEC) && starts_with(reply, "HTTP/1.1 200 OK\r\n") &&
+              response_len(reply, have) == have,
+          "만료됐거나 응답이 없다");
+    direct_close(&d);
+
+    d = direct_open(0);
+    write_all(d.client, S("GET / HT"));
+    (void)run_ready(d.c, 0, 10);
+    step = http_conn_run(d.c, 6 * SEC); /* 준비 알림만 있고 바이트 없음 */
+    check("TC-5-10 경계 미진행: 진행 없으면 마감 확인에서 TIMED_OUT",
+          step == HTTP_CONN_WANT_READ && expire_if_due(d.c, 6 * SEC) && d.c->result == HTTP_CONN_TIMED_OUT, "다르다");
+    direct_close(&d);
+
+    d = direct_open(0);
+    write_all(d.client, S("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 1048577\r\n\r\n"));
+    step = run_ready(d.c, 0, 10); /* 413 → shutdown → 정리(마감 5초 고정) */
+    have = read_available(d.client, reply, sizeof(reply));
+    write_all(d.client, "1", 1);
+    step = run_ready(d.c, 4 * SEC, 10);
+    check("TC-5-10 정리: 413 뒤 정리 중 4초에 받은 바이트는 읽어 버리고 계속",
+          starts_with(reply, "HTTP/1.1 413 ") && step == HTTP_CONN_WANT_READ, "다르다");
+    check("TC-5-10 정리: 읽어도 마감은 고정(5초)", http_conn_expired(d.c, 5 * SEC), "정리 마감이 늘었다");
+    write_all(d.client, "2", 1);
+    step = http_conn_run(d.c, 6 * SEC);
+    setup_or_die(ioctl(d.server, FIONREAD, &avail) == 0, "FIONREAD");
+    check("TC-5-10 정리: 마감 뒤 준비돼도 새로 읽지 않고 DONE",
+          step == HTTP_CONN_FINISHED && d.c->result == HTTP_CONN_DONE && avail == 1, "마감 뒤에 읽었다");
+    direct_close(&d);
+}
+
+static void test_deadlines(void)
+{
+    deadline_first_write_blocked();
+    deadline_slow_body_after_continue();
+    deadline_echo_output_blocked();
+    deadline_echo_input_stalled();
+    deadline_partial_write_bytes();
+    deadline_ready_at_boundary();
+}
+
 /* TC-4-31 (N1): /echo 머리를 보낸 뒤 본문 도중 상대가 닫으면 PEER_CLOSED, 머리와 받은 본문만 나간다. */
 static void test_echo_peer_closed_mid_body(void)
 {
@@ -937,18 +1332,25 @@ static void test_echo_peer_closed_mid_body(void)
 }
 
 /*
- * TC-4-32 (N1, P5·P6): ECONNRESET 분류. 응답이 도착한 것을 MSG_PEEK로 확인한 뒤 읽지 않은 채 닫으면
+ * TC-4-32 (N1, P5·P6): ECONNRESET 분류. 응답 전체가 도착한 것을 MSG_PEEK로 확인한 뒤 읽지 않은 채 닫으면
  * AF_UNIX에서 서버의 다음 read가 ECONNRESET이 된다. 요청 사이면 DONE, 요청 도중(다음 머리 일부가 버퍼에 있음)이면 ERROR.
  */
 static void econnreset_case(const char *name, const char *req, size_t len, http_conn_result want)
 {
-    char peek, label[160];
+    char peek[4096], label[160];
     int fds[2], rfd;
     pid_t pid = fork_server(fds, &rfd);
     served s;
 
     write_all(fds[0], req, len);
-    setup_or_die(recv(fds[0], &peek, 1, MSG_PEEK) == 1, "응답 도착 확인");
+    /* Step 5: 응답 전체가 도착한 것을 MSG_PEEK로만 확인한다(소비하지 않음). 그 뒤 서버의 다음 read가 ECONNRESET을 본다. */
+    for (;;) {
+        ssize_t n = recv(fds[0], peek, sizeof(peek), MSG_PEEK);
+        setup_or_die(n > 0, "응답 도착 확인");
+        if (response_len(peek, (size_t)n) > 0) {
+            break;
+        }
+    }
     close(fds[0]); /* 읽지 않은 응답을 둔 채 닫는다 */
     s = join_server(pid, rfd);
     snprintf(label, sizeof(label), "%s, errno ECONNRESET", name);
@@ -974,7 +1376,7 @@ static void test_continue_write_failure(void)
     write_all(fds[0], S("POST /x HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n"));
     close(fds[0]);
     errno = 0;
-    r = http_conn_serve(fds[1], root);
+    r = drive(fds[1], root);
     err = errno;
     close(fds[1]);
     check("TC-4-33 100 쓰기 실패 ERROR, errno EPIPE", r == HTTP_CONN_ERROR && err == EPIPE, strerror(err));
@@ -994,7 +1396,7 @@ static http_conn_result serve_open(const char *req, size_t len, int *err, double
     write_all(fds[0], req, len);
     clock_gettime(CLOCK_MONOTONIC, &start);
     errno = 0;
-    r = http_conn_serve(fds[1], root);
+    r = drive(fds[1], root);
     *err = errno;
     *secs = elapsed_since(&start);
     close(fds[1]);
@@ -1038,7 +1440,7 @@ static void slow_echo_timeout_mid_body(void)
     setup_or_die(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair");
     write_all(fds[0], S("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc"));
     clock_gettime(CLOCK_MONOTONIC, &start);
-    r = http_conn_serve(fds[1], root); /* 쓰기 방향은 열어 둔다 */
+    r = drive(fds[1], root); /* 쓰기 방향은 열어 둔다 */
     secs = elapsed_since(&start);
     close(fds[1]);
     reply_len = read_all(fds[0], reply, sizeof(reply));
@@ -1077,12 +1479,12 @@ static void slow_write_blocked(void)
     before = lowest_free_fd();
     clock_gettime(CLOCK_MONOTONIC, &start);
     errno = 0;
-    r = http_conn_serve(fds[1], root); /* fds[0]은 열어 둔 채 읽지 않는다 */
+    r = drive(fds[1], root); /* fds[0]은 열어 둔 채 읽지 않는다 */
     err = errno;
     secs = elapsed_since(&start);
     check("TC-4-29 쓰기 막힘 ERROR, errno EAGAIN·EWOULDBLOCK",
           r == HTTP_CONN_ERROR && (err == EAGAIN || err == EWOULDBLOCK), strerror(err));
-    /* SO_SNDTIMEO는 write 한 번 단위다(D-53). Linux는 막힌 write가 5초 뒤 쓴 만큼을 돌려주고 다음 write가 5초 뒤 EAGAIN이라 약 10초다. */
+    /* Step 5(D-59): 마지막 쓰기 진행 뒤 5초에 끝난다. 허용 범위는 Step 4 값을 그대로 확인만 한다(TC-5-07). */
     snprintf(detail, sizeof(detail), "%.2f초", secs);
     check("TC-4-29 4.5초 이상 걸리고 alarm(15) 전에 돌아옴", secs >= 4.5 && secs < 12.0, detail);
     check("TC-4-29 파일 fd 누수 없음", lowest_free_fd() == before, "열린 fd가 남았다");
@@ -1114,7 +1516,7 @@ static void run_slow_tests(void)
     pid_t pids[sizeof(fns) / sizeof(fns[0])];
     size_t i;
 
-    alarm(20); /* 자식들이 함께 기다린다(가장 긴 것은 TC-4-29의 약 10초) */
+    alarm(20); /* 자식들이 함께 기다린다(각각 약 5초) */
     for (i = 0; i < sizeof(fns) / sizeof(fns[0]); i++) {
         pids[i] = start_slow(fns[i]);
     }
@@ -1132,7 +1534,7 @@ int main(void)
 {
     alarm(10); /* 서버가 멈추면 끝없이 기다리지 않게 한다 */
     signal(SIGPIPE, SIG_IGN); /* D-05: 서버와 같은 조건 */
-    printf("test_http_conn (TC-2-07, TC-3-08, TC-3-10, TC-4-10·19·20·22·24~36)\n");
+    printf("test_http_conn (TC-2-07, TC-3-08, TC-3-10, TC-4-10·19·20·22·24~36, TC-5-09·10)\n");
     build_root();
     test_split_request();
     test_close_mid_head();
@@ -1155,6 +1557,8 @@ int main(void)
     test_leftover_partial_head();
     test_leftover_head_and_partial_body();
     test_head_exactly_8k();
+    test_buffered_work();
+    test_deadlines();
     run_slow_tests();
     remove_root();
 
