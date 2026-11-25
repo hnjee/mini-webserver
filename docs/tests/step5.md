@@ -128,4 +128,4 @@ Step 2 ~ 4의 연결 테스트(Step 2 UT-40 ~ 48, Step 3 UT-32 ~ 39, Step 4 UT-2
 
 | 날짜 | 커밋 | 단위 (UT) | 기능 (FT) | 코드 리뷰 (CR) | 처리량 (FT-04) | 비고 |
 | --- | --- | --- | --- | --- | --- | --- |
-| | | / 24 | / 11 | / 7 | | |
+| 2026-11-25 | (구현 커밋) | 24 / 24 | 5 / 11 | / 7 | | `test_event` 45/45, `test_server` 62/62, `test_http` 78/78, `test_file` 32/32, `test_config` 21/21, `make test-debug`도 통과. Dev Container가 아닌 VM에서 FT-01, FT-02, FT-05(`--limit-rate 1M`), FT-07, FT-11 통과. `ab`가 없어 FT-04, FT-06은 아직. FT-03, FT-08 ~ FT-10과 코드 리뷰는 아직 |
