@@ -185,3 +185,5 @@ for (;;) {
 ## Step 4에서 그대로 쓰는 것
 
 `http.c`(파싱, `Content-Length`, keep-alive 판단)와 `file.c`(경로, MIME)는 바꾸지 않아요. 바뀌는 건 `server.c`의 읽기·쓰기와 `server_run()`뿐이에요.
+
+구현 뒤 `server.c`가 커져서 세 파일로 나눴어요. `server.c`는 리슨 소켓·epoll·메인 루프·연결 받기와 정리, `conn.c`는 연결 하나의 읽기·보내기 상태 전이, `respond.c`는 응답 만들기(오류, 에코, 정적 파일)를 맡아요.
