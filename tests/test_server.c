@@ -5,10 +5,11 @@
  * - Step 2: docs/tests/step2.md 4장 UT-40 ~ UT-48 (handle_conn). 이름 앞에 S2를 붙인다.
  * - Step 3: docs/tests/step3.md 4장 UT-32 ~ UT-39 (handle_conn 파일 응답). 이름 앞에 S3를 붙인다.
  * - Step 4: docs/tests/step4.md 4장 UT-24 ~ UT-44 (본문, keep-alive, 남은 바이트). 이름 앞에 S4를 붙인다.
- *   Step 4부터 handle_conn은 연결을 유지하므로, 부모가 쓰기를 닫으면 다음 요청을 읽다가 끝난다.
- *   socketpair()로 만든 소켓 두 개 중 하나를 conn에 넣어 자식 프로세스에서 handle_conn()을 돌리고,
- *   부모는 다른 쪽에서 클라이언트로서 요청을 쓰고 응답을 읽는다.
- *   handle_conn()의 루트는 /tmp 아래에 만든 테스트용 www 폴더다.
+ * - Step 5: docs/tests/step5.md 4장. handle_conn()이 없어져서 run_conn을 바꿨다.
+ *   부모가 server_listen(0)으로 리슨 소켓을 열고, 자식 프로세스에서 server_run()(epoll 서버)을 돌린다.
+ *   부모는 127.0.0.1로 접속해 클라이언트로서 요청을 쓰고 쓰기를 닫은 뒤, 서버가 닫을 때까지 응답을 읽는다.
+ *   다 읽으면 자식을 SIGKILL로 끝낸다. handle_conn() 리턴값과 서버 쪽 남은 데이터 확인은 빠졌다.
+ *   서버의 루트는 /tmp 아래에 만든 테스트용 www 폴더다.
  */
 /* realpath()는 POSIX의 XSI 부분이라 _XOPEN_SOURCE를 켜야 선언된다 */
 #define _XOPEN_SOURCE 700
@@ -213,15 +214,13 @@ static void remove_fixture(void)
         printf("  (임시 폴더 %s를 지우지 못함)\n", g_base);
 }
 
-/* ---- handle_conn 실행 ---- */
+/* ---- 서버 실행 (Step 5: 자식 프로세스의 epoll 서버에 TCP로 접속) ---- */
 
 #define SPLIT_NONE ((size_t)-1)
 
 struct conn_result {
-    int ret;            /* handle_conn() 리턴값 (-2: 알 수 없음) */
-    int leftover_zero;  /* handle_conn() 뒤 서버 쪽 소켓의 recv(MSG_DONTWAIT)가 0이었으면 1 */
     char *out;          /* 클라이언트가 받은 응답 (끝에 '\0'을 붙여 둠) */
-    ssize_t got;        /* 받은 바이트 수 */
+    ssize_t got;        /* 받은 바이트 수, 실패하면 -1 */
 };
 
 static void sleep_100ms(void)
@@ -231,63 +230,52 @@ static void sleep_100ms(void)
 }
 
 /*
- * 자식이 conn을 만들어 handle_conn(c, g_root)을 돌린다. 리턴값과 남은 데이터 여부는 종료 코드로 알린다.
- * 부모는 req를 쓰고(split이면 split바이트까지 쓰고 0.1초 쉰 뒤 나머지) 쓰기를 닫은 다음, 응답을 끝까지 읽는다.
+ * 자식이 server_run(listen_fd, g_root)을 돌린다. 부모는 그 포트로 접속해 req를 쓰고
+ * (split이면 split바이트까지 쓰고 0.1초 쉰 뒤 나머지) 쓰기를 닫은 다음, 서버가 닫을 때까지 응답을 읽는다.
  */
 static void run_conn(const char *req, size_t len, size_t split, struct conn_result *res)
 {
-    res->ret = -2;
-    res->leftover_zero = 0;
     res->got = -1;
     res->out = malloc(OUT_CAP + 1);
     if (res->out == NULL)
         return;
     res->out[0] = '\0';
 
-    int sv[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
+    int lfd = server_listen(0);
+    if (lfd < 0)
         return;
+    struct sockaddr_in addr;
+    socklen_t alen = sizeof(addr);
+    memset(&addr, 0, sizeof(addr));
+    getsockname(lfd, (struct sockaddr *)&addr, &alen);
 
     pid_t server = fork();
     if (server == 0) {
-        close(sv[0]);
-        struct conn *c = malloc(sizeof(*c));
-        if (c == NULL)
-            _exit(3);
-        c->fd = sv[1];
-        c->len = 0;
-        c->body = NULL;
-        c->body_len = 0;
-        int r = handle_conn(c, g_root);
-        char t;
-        int zero = recv(sv[1], &t, 1, MSG_DONTWAIT) == 0;
-        close(sv[1]);
-        free(c);
-        _exit((r == 0 ? 0 : r == -1 ? 1 : 2) | (zero ? 4 : 0));
+        server_run(lfd, g_root);
+        _exit(0);
     }
-    close(sv[1]);
+    close(lfd);
 
-    if (split != SPLIT_NONE && split < len) {
-        write_full(sv[0], req, split);
-        sleep_100ms();
-        write_full(sv[0], req + split, len - split);
-    } else {
-        write_full(sv[0], req, len);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+        if (split != SPLIT_NONE && split < len) {
+            write_full(fd, req, split);
+            sleep_100ms();
+            write_full(fd, req + split, len - split);
+        } else {
+            write_full(fd, req, len);
+        }
+        shutdown(fd, SHUT_WR);
+        res->got = read_until_eof(fd, res->out, OUT_CAP);
+        if (res->got >= 0)
+            res->out[res->got] = '\0';
     }
-    shutdown(sv[0], SHUT_WR);
+    if (fd >= 0)
+        close(fd);
 
-    res->got = read_until_eof(sv[0], res->out, OUT_CAP);
-    if (res->got >= 0)
-        res->out[res->got] = '\0';
-    close(sv[0]);
-
-    int st = 0;
-    waitpid(server, &st, 0);
-    if (WIFEXITED(st)) {
-        int code = WEXITSTATUS(st);
-        res->ret = (code & 3) == 0 ? 0 : (code & 3) == 1 ? -1 : -2;
-        res->leftover_zero = (code & 4) != 0;
-    }
+    kill(server, SIGKILL);
+    waitpid(server, NULL, 0);
 }
 
 static void free_result(struct conn_result *res)
@@ -378,7 +366,6 @@ static void ut40_ok(void)
 {
     struct conn_result r;
     run_conn(REQ("GET / HTTP/1.1\r\nHost: x\r\n\r\n"), SPLIT_NONE, &r);
-    CHECK("S2 UT-40 리턴 0", r.ret == 0);
     CHECK("S2 UT-40 상태 줄 200", starts_with(&r, "HTTP/1.1 200 OK\r\n"));
     CHECK("S2 UT-40 Connection: keep-alive (Step 4부터 HTTP/1.1 기본 유지)", has_header_line(&r, "Connection: keep-alive"));
     CHECK("S2 UT-40 헤더의 끝 \\r\\n\\r\\n", body_offset(&r) > 0);
@@ -410,7 +397,6 @@ static void ut42_ut43_ut48_size(void)
     if (req != NULL) {
         run_conn(req, 8193, SPLIT_NONE, &r);
         CHECK("S2 UT-43 8193바이트는 431", starts_with(&r, "HTTP/1.1 431 Request Header Fields Too Large\r\n"));
-        CHECK("S2 UT-48 drain 뒤 서버 쪽에 남은 데이터 없음 (recv == 0)", r.leftover_zero);
         free_result(&r);
         free(req);
     }
@@ -420,7 +406,6 @@ static void ut44_disconnect(void)
 {
     struct conn_result r;
     run_conn(REQ("GET / HTTP/1.1\r\n"), SPLIT_NONE, &r);
-    CHECK("S2 UT-44 헤더의 끝 전에 끊기면 리턴 -1", r.ret == -1);
     CHECK("S2 UT-44 아무 응답 없음", r.got == 0);
     free_result(&r);
 }
@@ -460,7 +445,6 @@ static void ut32_style(void)
 {
     struct conn_result r;
     run_conn(REQ("GET /style.css HTTP/1.1\r\nHost: x\r\n\r\n"), SPLIT_NONE, &r);
-    CHECK("S3 UT-32 리턴 0", r.ret == 0);
     CHECK("S3 UT-32 상태 줄 200", starts_with(&r, "HTTP/1.1 200 OK\r\n"));
     CHECK("S3 UT-32 Content-Type: text/css; charset=utf-8", has_header_line(&r, "Content-Type: text/css; charset=utf-8"));
     CHECK("S3 UT-32 Connection: keep-alive", has_header_line(&r, "Connection: keep-alive"));
@@ -574,7 +558,6 @@ static void s4_ut24_to_ut28_echo(void)
 
     run_conn(REQ("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n"
                  "Content-Length: 11\r\n\r\nname=hyunji"), SPLIT_NONE, &r);
-    CHECK("S4 UT-24 리턴 0", r.ret == 0);
     CHECK("S4 UT-24 200", starts_with(&r, "HTTP/1.1 200 OK\r\n"));
     CHECK("S4 UT-24 Content-Type을 요청에서 따름",
           has_header_line(&r, "Content-Type: application/x-www-form-urlencoded"));
@@ -721,7 +704,7 @@ static void s4_ut35_to_ut44_errors(void)
 int main(void)
 {
     signal(SIGPIPE, SIG_IGN);   /* 끊긴 소켓에 써도 테스트 프로그램이 죽지 않게 */
-    alarm(60);                  /* handle_conn이 멈추면 테스트를 끝냄 */
+    alarm(60);                  /* 서버가 멈추면 테스트를 끝냄 */
 
     printf("test_server\n");
     ut01_to_ut05_listen();
