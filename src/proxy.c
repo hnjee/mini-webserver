@@ -96,6 +96,7 @@ static int build_request(struct conn *c)
 void proxy_start(struct server *s, struct conn *c, struct route *rt)
 {
     c->keep = 0;                                 /* 프록시 응답 뒤에는 클라이언트도 닫아요 (결정 20행) */
+    c->log_pending = 1;                          /* 끝나거나 끊길 때 로그를 남겨요 (S7-06) */
     c->hdr_end = c->len;                         /* 뒤에 붙은 요청은 버려요 */
     c->sent_to_client = 0;
     c->back_eof = 0;
@@ -149,6 +150,9 @@ void proxy_start(struct server *s, struct conn *c, struct route *rt)
 /* 클라이언트에 보낼 수 있는 만큼 보내요. 연결을 닫았으면 -1 */
 static int relay_flush(struct server *s, struct conn *c)
 {
+    if (c->status == 0 && c->sent_to_client == 0 && c->wpos - c->rpos >= 12 &&
+        memcmp(c->relay + c->rpos, "HTTP/", 5) == 0)
+        c->status = atoi(c->relay + c->rpos + 9);   /* 백엔드 응답의 상태 코드 (로그용) */
     while (c->rpos < c->wpos) {
         ssize_t w = write(c->fd, c->relay + c->rpos, c->wpos - c->rpos);
         if (w < 0) {
@@ -161,6 +165,7 @@ static int relay_flush(struct server *s, struct conn *c)
         }
         c->rpos += (size_t)w;
         c->sent_to_client += (size_t)w;
+        c->bytes_out += (size_t)w;
         c->last_active = time(NULL);
     }
     if (c->rpos == c->wpos)

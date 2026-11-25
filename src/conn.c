@@ -5,6 +5,7 @@
 #include "server.h"
 
 #include "http.h"
+#include "log.h"
 #include "proxy.h"
 #include "respond.h"
 
@@ -97,6 +98,7 @@ static int flush(struct server *s, struct conn *c)
             return FLUSH_CLOSED;
         }
         c->last_active = time(NULL);
+        c->bytes_out += (size_t)w;
         if (c->out_sent < c->out_len)
             c->out_sent += (size_t)w;
         else
@@ -107,8 +109,9 @@ static int flush(struct server *s, struct conn *c)
         watch(s, c, EPOLLIN);
         c->want_out = 0;
     }
+    access_log_conn(c);                      /* 응답 하나 끝: 로그 한 줄 (S7-06) */
     response_reset(c);
-    if (!c->keep) {
+    if (!c->keep || s->stopping) {           /* 종료 중이면 keep-alive 없이 닫아요 (S7-02) */
         server_close_conn(s, c);
         return FLUSH_CLOSED;
     }
@@ -117,6 +120,8 @@ static int flush(struct server *s, struct conn *c)
     c->len -= c->hdr_end;
     c->hdr_end = 0;
     c->state = ST_HEADER;
+    if (c->len > 0)
+        c->req_start = time(NULL);           /* 다음 요청이 이미 와 있음: 헤더 시계 시작 */
     return FLUSH_DONE;
 }
 
@@ -124,6 +129,9 @@ static int flush(struct server *s, struct conn *c)
 static int start_write(struct server *s, struct conn *c)
 {
     c->state = ST_WRITE;
+    if (c->status == 0 && c->out != NULL && c->out_len >= 12)
+        c->status = atoi(c->out + 9);        /* "HTTP/1.1 200 ..." */
+    c->log_pending = 1;
     return flush(s, c);
 }
 
@@ -141,7 +149,11 @@ static void advance(struct server *s, struct conn *c)
             if (end == 0 && c->len == sizeof(c->buf))
                 end = (size_t)-1;            /* 버퍼가 꽉 찼는데 헤더의 끝이 없음 */
             if (end != 0) {
+                clock_gettime(CLOCK_MONOTONIC, &c->t_req);
+                c->status = 0;
+                c->bytes_out = 0;
                 int status = end == (size_t)-1 ? 431 : http_parse_request(c->buf, end, &c->req);
+                c->has_req = status == 0;
                 if (status == 0)
                     status = body_length(c);
                 if (status != 0) {           /* 경계를 모름: 오류 응답 뒤 닫기 */
@@ -155,6 +167,8 @@ static void advance(struct server *s, struct conn *c)
                     return;
                 }
                 c->keep = http_keep_alive(&c->req);
+                if (s->stopping)
+                    c->keep = 0;                 /* 종료 중: 이 응답 뒤에 닫아요 (S7-02) */
                 size_t have = c->len - end;
                 if (have > c->cl)
                     have = c->cl;            /* 그 뒤는 다음 요청 */
@@ -198,6 +212,8 @@ static void advance(struct server *s, struct conn *c)
         ssize_t n = read(c->fd, dst, room);
         if (n > 0) {
             c->last_active = time(NULL);
+            if (c->state == ST_HEADER && c->len == 0)
+                c->req_start = c->last_active;   /* 새 요청의 첫 바이트: 헤더 시계 시작 (S7-04) */
             if (c->state == ST_HEADER)
                 c->len += (size_t)n;
             else
@@ -223,6 +239,8 @@ void conn_send_error(struct server *s, struct conn *c, int status)
     c->keep = 0;
     c->hdr_end = c->len;                         /* 뒤에 붙은 요청은 버려요 */
     c->want_out = 0;
+    c->status = 0;
+    c->bytes_out = 0;
     conn_watch_client(s, c, EPOLLIN);
     if (prepare_error(c, status, NULL) < 0) {
         server_close_conn(s, c);

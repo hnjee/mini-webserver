@@ -2,6 +2,7 @@
 #define _XOPEN_SOURCE 700
 
 #include "config.h"
+#include "log.h"
 #include "route.h"
 #include "server.h"
 
@@ -80,6 +81,9 @@ int main(int argc, char *argv[])
     printf("listening on %d\n", cfg.port);
     fflush(stdout);
 
-    server_run(listen_fd, root_real, rp, workers);
-    return EXIT_SUCCESS;   /* 도달하지 않음 */
+    access_log_set_fd(STDOUT_FILENO);    /* 접근 로그는 화면에 (S7-06) */
+    server_run(listen_fd, root_real, rp, workers);   /* 종료 신호를 받고 워커가 다 끝나면 돌아와요 */
+    close(listen_fd);
+    fprintf(stderr, "종료했어요\n");
+    return EXIT_SUCCESS;
 }
