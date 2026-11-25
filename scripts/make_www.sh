@@ -8,6 +8,7 @@ ROOT="${1:-./www}"
 dd if=/dev/urandom of="$ROOT/large.bin" bs=1M count=5 status=none
 echo "large.bin: $(wc -c < "$ROOT/large.bin") bytes"
 
+rm -f "$ROOT/secret.txt"   # 이미 있으면 권한 000이라 덮어쓸 수 없어서 먼저 지움
 echo "이 파일이 보이면 403 처리가 안 된 것" > "$ROOT/secret.txt"
 chmod 000 "$ROOT/secret.txt"
 if [ -r "$ROOT/secret.txt" ]; then
