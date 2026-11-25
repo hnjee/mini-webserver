@@ -1,4 +1,5 @@
 # 기본 빌드, 디버그(ASan) 빌드, 단위 테스트, 공통 테스트 파일, SO_REUSEADDR 실험(Step 1).
+# 워커 확장: 서버는 -pthread로 빌드하고, ThreadSanitizer 빌드(make tsan)를 둔다.
 # echo 모듈은 서버 소스에서 빠졌고 Step 1 회귀 시험(test_echo)에만 쓴다(D-13).
 CC      ?= cc
 CSTD    ?= -std=c11
@@ -9,8 +10,13 @@ LDFLAGS ?=
 DEBUG_CFLAGS  = -O0 -g -fsanitize=address -fno-omit-frame-pointer
 DEBUG_LDFLAGS = -fsanitize=address
 
+TSAN_CFLAGS  = -O1 -g -fsanitize=thread -fno-omit-frame-pointer
+TSAN_LDFLAGS = -fsanitize=thread
+
 TARGET      = webserver
 DEBUG_TARGET = webserver-debug
+TSAN_TARGET  = webserver-tsan
+TSAN_TESTS   = tests/test_route-tsan tests/test_server_loop-tsan
 SRC         = src/main.c src/options.c src/listener.c src/server_loop.c src/http_conn.c src/http_parser.c \
               src/http_response.c src/io.c src/static_file.c src/mime.c \
               src/route.c src/proxy.c
@@ -22,7 +28,7 @@ EXPERIMENT  = experiments/bind_no_reuse
 
 WWW        = www
 
-.PHONY: all debug test experiment fixtures clean help FORCE
+.PHONY: all debug tsan test experiment fixtures clean help FORCE
 
 # bind mount로 호스트(macOS) 산출물이 섞일 수 있다. 플랫폼이 바뀌면 이 파일이 갱신되어 전부 다시 빌드된다.
 BUILD_STAMP    = .build-platform
@@ -34,13 +40,28 @@ $(BUILD_STAMP): FORCE
 all: $(TARGET)
 
 $(TARGET): $(SRC) $(HDR) $(BUILD_STAMP)
-	$(CC) $(CSTD) $(WARN) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS)
+	$(CC) $(CSTD) $(WARN) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS) -pthread
 
 # 디버그 빌드는 AddressSanitizer를 켠다.
 debug: $(DEBUG_TARGET)
 
 $(DEBUG_TARGET): $(SRC) $(HDR) $(BUILD_STAMP)
-	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ $(SRC) $(DEBUG_LDFLAGS)
+	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ $(SRC) $(DEBUG_LDFLAGS) -pthread
+
+# ThreadSanitizer 빌드: 서버(webserver-tsan)와 스레드를 쓰는 단위 시험 두 개를 만들고 시험을 실행한다.
+tsan: $(TSAN_TARGET) $(TSAN_TESTS)
+	./tests/test_route-tsan
+	./tests/test_server_loop-tsan
+
+$(TSAN_TARGET): $(SRC) $(HDR) $(BUILD_STAMP)
+	$(CC) $(CSTD) $(WARN) $(TSAN_CFLAGS) -o $@ $(SRC) $(TSAN_LDFLAGS) -pthread
+
+tests/test_route-tsan: tests/test_route.c $(ROUTE_SRC) src/route.h $(BUILD_STAMP)
+	$(CC) $(CSTD) $(WARN) $(TSAN_CFLAGS) -o $@ tests/test_route.c $(ROUTE_SRC) $(TSAN_LDFLAGS) -pthread
+
+tests/test_server_loop-tsan: tests/test_server_loop.c src/server_loop.c src/server_loop.h $(HTTP_CONN_SRC) $(HTTP_CONN_HDR) $(BUILD_STAMP)
+	$(CC) $(CSTD) $(WARN) $(TSAN_CFLAGS) -o $@ tests/test_server_loop.c src/server_loop.c $(HTTP_CONN_SRC) $(TSAN_LDFLAGS) -pthread \
+		-Wl,--wrap=accept4 -Wl,--wrap=epoll_wait -Wl,--wrap=pthread_create
 
 # 단위 테스트도 ASan으로 빌드해 실행한다.
 test: $(TEST_TARGETS)
@@ -83,12 +104,14 @@ tests/test_static_file: tests/test_static_file.c $(STATIC_FILE_SRC) src/static_f
 	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_static_file.c $(STATIC_FILE_SRC) $(DEBUG_LDFLAGS)
 
 # TC-5-11: accept 재시도 오류는 링크 단계 --wrap으로 주입한다(제품 코드에 시험용 분기 없음).
+# 워커 확장: epoll_wait 관문·실패와 pthread_create 실패도 같은 방식으로 주입한다.
 tests/test_server_loop: tests/test_server_loop.c src/server_loop.c src/server_loop.h $(HTTP_CONN_SRC) $(HTTP_CONN_HDR) $(BUILD_STAMP)
-	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_server_loop.c src/server_loop.c $(HTTP_CONN_SRC) $(DEBUG_LDFLAGS) -Wl,--wrap=accept4
+	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_server_loop.c src/server_loop.c $(HTTP_CONN_SRC) $(DEBUG_LDFLAGS) -pthread \
+		-Wl,--wrap=accept4 -Wl,--wrap=epoll_wait -Wl,--wrap=pthread_create
 
 ROUTE_SRC = src/route.c
 tests/test_route: tests/test_route.c $(ROUTE_SRC) src/route.h $(BUILD_STAMP)
-	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_route.c $(ROUTE_SRC) $(DEBUG_LDFLAGS)
+	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_route.c $(ROUTE_SRC) $(DEBUG_LDFLAGS) -pthread
 
 tests/test_proxy: tests/test_proxy.c src/proxy.c src/proxy.h src/http_parser.c src/http_parser.h src/http_response.h $(BUILD_STAMP)
 	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_proxy.c src/proxy.c src/http_parser.c $(DEBUG_LDFLAGS)
@@ -134,12 +157,13 @@ fixtures:
 	echo "$$dir"
 
 clean:
-	rm -f $(TARGET) $(DEBUG_TARGET) $(TEST_TARGETS) $(EXPERIMENT) $(BUILD_STAMP)
+	rm -f $(TARGET) $(DEBUG_TARGET) $(TSAN_TARGET) $(TEST_TARGETS) $(TSAN_TESTS) $(EXPERIMENT) $(BUILD_STAMP)
 	rm -rf $(TARGET).dSYM $(DEBUG_TARGET).dSYM $(addsuffix .dSYM,$(TEST_TARGETS))
 
 help:
 	@echo "make          기본 빌드 ($(TARGET))"
 	@echo "make debug    디버그 빌드 ($(DEBUG_TARGET), AddressSanitizer)"
+	@echo "make tsan     ThreadSanitizer 빌드 ($(TSAN_TARGET)) 후 스레드 시험 실행 (test_route, test_server_loop)"
 	@echo "make test     단위 테스트 빌드 후 실행 (test_options, test_echo, test_http_parser, test_http_response, test_http_conn, test_mime, test_static_file, test_server_loop, test_route, test_proxy, test_proxy_conn)"
 	@echo "make experiment SO_REUSEADDR 없는 bind 실험 프로그램 빌드 ($(EXPERIMENT))"
 	@echo "make fixtures 컨테이너 내부 /home/jungle/mini-webserver-www에 테스트용 www 준비, 경로를 stdout에 출력"

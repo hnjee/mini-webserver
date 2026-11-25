@@ -1,11 +1,13 @@
 /*
  * Step 6 단위 테스트: 라우팅 설정 글자 → 표(TC-6-06), 매칭·전달 주소·라운드 로빈(TC-6-05).
+ * 워커 확장: 여러 스레드의 동시 route_pick(카운터 원자 증가).
  */
 #define _POSIX_C_SOURCE 200809L
 
 #include "../src/route.h"
 
 #include <arpa/inet.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -199,6 +201,46 @@ static void test_round_robin(void)
     check("TC-6-05 규칙마다 카운터 하나, 번갈아 고름", strcmp(seq, "13241523") == 0, seq);
 }
 
+/* 워커 확장: 여러 스레드가 같은 규칙을 동시에 골라도 증가가 사라지지 않아 백엔드별 횟수가 정확히 같다. */
+enum { RACE_THREADS = 8, RACE_PICKS = 200000 };
+static route_rule *race_rule;
+static unsigned long race_counts[RACE_THREADS][ROUTE_MAX_BACKENDS];
+
+static void *race_worker(void *arg)
+{
+    unsigned long *counts = arg;
+    int i;
+    for (i = 0; i < RACE_PICKS; i++) {
+        counts[route_pick(race_rule) - race_rule->backends]++;
+    }
+    return NULL;
+}
+
+static void test_round_robin_threads(void)
+{
+    char error[256] = "", detail[160];
+    pthread_t th[RACE_THREADS];
+    unsigned long total[4] = {0};
+    int i, j, made = 0;
+
+    parse("route /a/ h:1 h:2 h:3 h:4\n", error, sizeof(error));
+    race_rule = &table.rules[0];
+    for (i = 0; i < RACE_THREADS; i++) {
+        made += pthread_create(&th[i], NULL, race_worker, race_counts[i]) == 0;
+    }
+    for (i = 0; i < made; i++) {
+        pthread_join(th[i], NULL);
+    }
+    for (i = 0; i < RACE_THREADS; i++) {
+        for (j = 0; j < 4; j++) {
+            total[j] += race_counts[i][j];
+        }
+    }
+    snprintf(detail, sizeof(detail), "스레드 %d개, 횟수 %lu %lu %lu %lu", made, total[0], total[1], total[2], total[3]);
+    check("워커 확장 route_pick 8스레드 × 20만 번: 백엔드 4개 횟수가 정확히 같음",
+          made == RACE_THREADS && total[0] == total[1] && total[1] == total[2] && total[2] == total[3], detail);
+}
+
 static void test_resolve_and_load(void)
 {
     char error[256] = "", path[] = "/tmp/test_route-XXXXXX";
@@ -230,6 +272,7 @@ int main(void)
     test_long_backend_token();
     test_match();
     test_round_robin();
+    test_round_robin_threads();
     test_resolve_and_load();
     if (failures > 0) {
         printf("실패 %d건\n", failures);

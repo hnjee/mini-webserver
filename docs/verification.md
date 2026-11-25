@@ -19,6 +19,12 @@
 | [Step 7](./steps/step-7-robustness/README.md) | ⬜ | - | - |
 | [Step 8](./steps/step-8-final/README.md) | ⬜ | - | - |
 
+## Step 6 뒤 워커 풀 확장
+
+- **구현자 자체 시험 (2026-11-26):** Linux Docker에서 `make -B test` 11개·`make -B tsan` 통과, Step 3~6 기능 54건을 O2·ASan·TSan 각각 통과, `ab -n 2000 -c 50` 실패 0. [확장 기록](./extensions/worker-pool/README.md#10-구현자체-점검-기록).
+- **독립 검증 (2026-11-26):** Mavuika가 변경 코드와 6개 신규 경계 시나리오를 O2·ASan·TSan에서 실행해 차단 결함을 찾지 못했다. 실제 루프의 응답 96개와 실패 종료를 추가 확인했다. 전체 기존 기능 54건·부하 시험은 독립 재실행하지 않았다. [로컬 보고서](../.agent/reviews/worker-pool-verify/report.md).
+- **남은 한계:** 백엔드 교체 뒤 옛 알림 폐기는 FD 재사용 방어 시험을 통과했으나 자연 요청의 이중 알림 배치로 재현하지 못했다.
+
 ## 최종 비교용 수치
 
 [DESIGN.md 7장](../DESIGN.md#7-최종-비교) 비교표에서 이 구현 칸에 옮길 값이다.

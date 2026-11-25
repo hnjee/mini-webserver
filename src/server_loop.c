@@ -1,56 +1,94 @@
 #define _GNU_SOURCE /* accept4, accept(2)의 ENONET 등 Linux 오류 코드 */
 
 /*
- * D-56, D-57, D-67: epoll 레벨 트리거 루프. 연결 목록·내부 실행 목록·마감 확인·끝난 연결 정리·소켓 등록을 맡고,
- * 연결 하나의 상태 전이는 http_conn에 맡긴다. 한 회차 = 반환 배치 → 회차 시작 때 실행 목록 → 마감 확인 → 정리.
- * 연결마다 지금 기다리는 소켓 하나만 등록하고, 업로드 중에만 백엔드 읽기를 함께 등록한다.
+ * D-56, D-57, D-67: epoll 레벨 트리거 루프. 연결 목록·마감 확인·끝난 연결 정리·소켓 등록을 맡고,
+ * 연결 하나의 상태 전이는 http_conn에 맡긴다. 연결마다 지금 기다리는 소켓 하나만 등록하고,
+ * 업로드 중에만 백엔드 읽기를 함께 등록한다.
+ * 워커 확장(docs/extensions/worker-pool, 임시): 루프는 http_conn_run을 직접 부르지 않고 작업 큐에 넣는다.
+ * 워커가 한 차례를 실행해 완료 큐에 넣고 eventfd로 깨운다. 넣기 전에 등록을 모두 지우므로 연결 하나는
+ * 동시에 워커 하나만 처리한다. 한 회차 = 배치 모으기 → 넣기 → 완료 회수 → 마감 확인 → 정리.
  */
 #include "server_loop.h"
 #include "http_conn.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
 #define LOOP_MAX_EVENTS 64 /* epoll_wait 한 번에 받는 준비 알림 수 */
 #define LOOP_ACCEPT_MAX 64 /* 회차당 accept 시도 상한(성공·재시도 오류·준비 실패 모두 1번) */
+#define LOOP_WORKERS 4     /* 워커 수(임시 기본값) */
 
 struct conn;
 
-/* epoll 알림이 가리키는 표: 어느 연결의 어느 소켓인가(D-67). 듣는 소켓은 NULL이다. */
+/* epoll 알림이 가리키는 표: 어느 연결의 어느 소켓인가(D-67). 듣는 소켓은 NULL, eventfd는 evfd_tag다. */
 typedef struct {
     struct conn *owner;
     int backend; /* 0 클라이언트, 1 백엔드 */
 } tag;
 
+static tag evfd_tag; /* owner가 NULL인 표: 완료 통지 eventfd */
+
+/* 실행 상태(큐 잠금 안에서만 읽고 바꾼다). 등록 대기·끝은 루프 필드(busy·finished)로 나타낸다. */
+enum { RUN_IDLE, RUN_QUEUED, RUN_RUNNING, RUN_DONE };
+
+/* 배치에서 받은 알림 하나 = 차례 하나. 백엔드 알림은 배치 직후 세대를 함께 둔다(D-67). */
+typedef struct {
+    int wake;
+    int backend;
+    unsigned gen;
+} cause;
+
 typedef struct conn {
     http_conn http;
-    struct conn *prev, *next; /* 모든 연결(마감 확인) */
-    struct conn *run_next;    /* 내부 실행 목록 */
+    struct conn *prev, *next; /* 모든 연결(마감 확인·종료 해제) */
+    struct conn *q_next;      /* 작업 큐·완료 큐 고리(한 번에 한 곳, 큐 잠금) */
+    struct conn *touch_next;  /* 이번 배치에 알림을 받은 연결 */
     struct conn *done_next;   /* 이번 회차에 끝난 연결 */
     tag client_tag, backend_tag;
     unsigned client_events;   /* 클라이언트 소켓에 등록한 방향, 0이면 등록 안 됨 */
     unsigned backend_events;  /* 백엔드 소켓에 등록한 방향, 0이면 등록 안 됨 */
     unsigned backend_reg_gen; /* 등록한 백엔드 소켓의 세대 */
-    int waiting;              /* 마지막 차례가 기다림(WANT_*)이었다 */
-    int queued;               /* 실행 목록에 있다(중복 방지) */
+    cause causes[2];          /* 보존한 차례: 배치 순서대로 소켓마다 최대 하나 */
+    int ncauses, next_cause;
+    int wake;                 /* 워커에 넘길 원인. 루프가 넣기 전에 쓰고 워커가 꺼낸 뒤 읽는다 */
+    http_conn_step step;      /* 마지막 차례 결과. 워커가 쓰고 루프가 회수 뒤 읽는다 */
+    int sched;                /* RUN_*, 큐 잠금 */
+    int busy;                 /* 루프만: 넣었고 아직 회수하지 않았다. 등록·마감 확인·정리 대상이 아니다 */
     int finished;             /* 끝 표시. 다시 실행하지 않는다 */
 } conn;
+
+typedef struct {
+    pthread_mutex_t lock; /* 작업 큐·완료 큐·sched·stop */
+    pthread_cond_t cond;  /* 작업 큐에 넣음·정지 */
+    conn *work_head, *work_tail;
+    conn *done_head, *done_tail;
+    int stop;
+    int evfd;
+} pool;
 
 typedef struct {
     int epfd, listen_fd;
     const char *root;
     route_table *routes;
     conn *all;
-    conn *run_head, *run_tail; /* 다음 회차에 실행할 연결 */
-    conn *done;                /* 회차 끝에 정리할 연결 */
+    conn *done;                    /* 회차 끝에 정리할 연결 */
+    conn *touch_head, *touch_tail; /* 이번 배치에 알림을 받은 연결 */
+    pool p;
+    int lock_ready, cond_ready;
+    pthread_t workers[LOOP_WORKERS];
+    int nworkers; /* 만든 워커 수(join 대상) */
 } loop;
 
 static long long now_ns(void)
@@ -80,14 +118,103 @@ static int accept_retryable(int err)
     }
 }
 
-/* 끝 표시만 하고 해제는 회차 끝에 한다(C3). 같은 배치·실행 목록에 남은 포인터가 해제된 메모리를 가리키지 않는다. */
+/* ---- 워커 ---- */
+
+/* 완료를 알린다. EAGAIN(계수 포화)은 이미 0이 아니라 루프가 깨므로 성공이다. 그 밖은 계약상 생기지 않는다. */
+static void notify_loop(int evfd)
+{
+    uint64_t one = 1;
+
+    for (;;) {
+        if (write(evfd, &one, sizeof(one)) == (ssize_t)sizeof(one) || errno == EAGAIN) {
+            return;
+        }
+        if (errno != EINTR) {
+            fprintf(stderr, "eventfd 쓰기 실패로 중단: %s\n", strerror(errno));
+            abort(); /* 정상 종료 경로가 아니다: 루프가 완료를 영영 모르게 되므로 바로 멈춘다 */
+        }
+    }
+}
+
+/* 작업 큐에서 연결 하나를 꺼내 http_conn_run 한 차례를 실행하고 완료 큐에 넣는다. 정지 표시를 보면 끝난다. */
+static void *worker_main(void *arg)
+{
+    pool *p = arg;
+
+    for (;;) {
+        conn *c;
+
+        pthread_mutex_lock(&p->lock);
+        while (!p->stop && p->work_head == NULL) {
+            pthread_cond_wait(&p->cond, &p->lock);
+        }
+        if (p->stop) { /* 작업 큐에 남은 연결은 실행하지 않는다 */
+            pthread_mutex_unlock(&p->lock);
+            return NULL;
+        }
+        c = p->work_head;
+        p->work_head = c->q_next;
+        if (p->work_head == NULL) {
+            p->work_tail = NULL;
+        }
+        assert(c->sched == RUN_QUEUED); /* 연결당 워커 하나 */
+        c->sched = RUN_RUNNING;
+        pthread_mutex_unlock(&p->lock);
+
+        c->step = http_conn_run(&c->http, c->wake, now_ns()); /* 차례를 시작할 때의 현재 시각 */
+
+        pthread_mutex_lock(&p->lock);
+        assert(c->sched == RUN_RUNNING);
+        c->sched = RUN_DONE;
+        c->q_next = NULL;
+        if (p->done_tail != NULL) {
+            p->done_tail->q_next = c;
+        } else {
+            p->done_head = c;
+        }
+        p->done_tail = c;
+        pthread_mutex_unlock(&p->lock);
+        notify_loop(p->evfd); /* 넣은 뒤에 쓴다: 깨우기 손실 없음 */
+    }
+}
+
+/* 정지 표시 → 모두 깨움 → 잠금 밖에서 만든 워커만 join. 실행 중 차례는 마치고 완료 큐에 넣은 뒤 끝난다. */
+static void stop_workers(loop *l)
+{
+    int i;
+
+    if (l->nworkers == 0) {
+        return;
+    }
+    pthread_mutex_lock(&l->p.lock);
+    l->p.stop = 1;
+    pthread_cond_broadcast(&l->p.cond);
+    pthread_mutex_unlock(&l->p.lock);
+    for (i = 0; i < l->nworkers; i++) {
+        pthread_join(l->workers[i], NULL);
+    }
+    l->nworkers = 0;
+}
+
+/* ---- 루프 ---- */
+
+/* 끝 표시만 하고 해제는 회차 끝에 한다(C3). 같은 배치에 남은 포인터가 해제된 메모리를 가리키지 않는다. */
 static void mark_finished(loop *l, conn *c)
 {
     if (!c->finished) {
         c->finished = 1;
+        c->ncauses = c->next_cause = 0; /* 보존 차례는 버린다 */
         c->done_next = l->done;
         l->done = c;
     }
+}
+
+/* 등록 변경 실패는 그 연결 ERROR(D-57, D-67). errno를 그대로 기록한다. */
+static void conn_error(loop *l, conn *c)
+{
+    c->http.result = HTTP_CONN_ERROR;
+    c->http.err = errno;
+    mark_finished(l, c);
 }
 
 /* 한 소켓의 등록을 want로 맞춘다: 0이면 DEL, 처음이면 ADD, 그 밖은 MOD. *events는 등록한 방향이다. */
@@ -109,6 +236,14 @@ static int set_interest(loop *l, int fd, tag *t, unsigned *events, unsigned want
     return 0;
 }
 
+/* 등록해 둔 백엔드가 닫혔으면(세대가 바뀜) close가 등록도 지웠다. DEL 없이 0으로 둔다. */
+static void fix_backend_gen(conn *c)
+{
+    if (c->backend_events != 0 && c->backend_reg_gen != c->http.be_gen) {
+        c->backend_events = 0;
+    }
+}
+
 /* 기다리는 차례 결과에 맞춰 두 소켓의 등록을 바꾼다(D-67). 실패하면 -1(errno). */
 static int apply_interest(loop *l, conn *c, http_conn_step step)
 {
@@ -120,10 +255,7 @@ static int apply_interest(loop *l, conn *c, http_conn_step step)
     } else if (step == HTTP_CONN_WANT_BACKEND_WRITE) {
         want_backend = EPOLLOUT | (c->http.uploading ? EPOLLIN : 0);
     }
-    /* 등록해 둔 백엔드가 닫혔으면(세대가 바뀜) close가 등록도 지웠다. 같은 fd 번호의 새 소켓은 DEL 없이 ADD한다 */
-    if (c->backend_events != 0 && c->backend_reg_gen != c->http.be_gen) {
-        c->backend_events = 0;
-    }
+    fix_backend_gen(c); /* 같은 fd 번호의 새 소켓은 DEL 없이 ADD한다 */
     if (set_interest(l, c->http.fd, &c->client_tag, &c->client_events, want_client) != 0) {
         return -1;
     }
@@ -135,39 +267,92 @@ static int apply_interest(loop *l, conn *c, http_conn_step step)
     return 0;
 }
 
-static void enqueue(loop *l, conn *c)
+/* 넣기·만료 전에 유효한 등록만 모두 지운다(세대 보정 먼저). 실패하면 -1(errno). */
+static int unregister(loop *l, conn *c)
 {
-    c->waiting = 0;
-    if (!c->queued) {
-        c->queued = 1;
-        c->run_next = NULL;
-        if (l->run_tail != NULL) {
-            l->run_tail->run_next = c;
-        } else {
-            l->run_head = c;
+    fix_backend_gen(c);
+    if (set_interest(l, c->http.fd, &c->client_tag, &c->client_events, 0) != 0) {
+        return -1;
+    }
+    if (c->backend_events != 0 && set_interest(l, c->http.be_fd, &c->backend_tag, &c->backend_events, 0) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* 작업 큐에 넣는다. 등록이 없는(바쁘지 않은) 연결만 넣는다. */
+static void submit(loop *l, conn *c, int wake)
+{
+    assert(!c->finished && !c->busy && c->client_events == 0 && c->backend_events == 0);
+    c->busy = 1;
+    c->wake = wake;
+    pthread_mutex_lock(&l->p.lock);
+    assert(c->sched == RUN_IDLE); /* 연결당 워커 하나 */
+    c->sched = RUN_QUEUED;
+    c->q_next = NULL;
+    if (l->p.work_tail != NULL) {
+        l->p.work_tail->q_next = c;
+    } else {
+        l->p.work_head = c;
+    }
+    l->p.work_tail = c;
+    pthread_cond_signal(&l->p.cond);
+    pthread_mutex_unlock(&l->p.lock);
+}
+
+/* 보존 차례 중 다음 것을 넣는다. 백엔드 차례는 넣기 직전에 세대를 다시 비교해 다르면 버린다. 넣었으면 1. */
+static int submit_next_cause(loop *l, conn *c)
+{
+    while (c->next_cause < c->ncauses) {
+        const cause *k = &c->causes[c->next_cause++];
+        if (k->backend && (k->gen != c->http.be_gen || c->http.be_fd < 0)) {
+            continue; /* 앞 차례가 백엔드를 닫거나 바꿨다: 옛 소켓 알림 */
         }
-        l->run_tail = c;
+        submit(l, c, k->wake);
+        return 1;
+    }
+    c->ncauses = c->next_cause = 0;
+    return 0;
+}
+
+/* 보존 차례가 없을 때 마지막 차례 결과로만 다음을 정한다: 내부 실행이나 다시 등록(그 뒤 대기). */
+static void settle(loop *l, conn *c)
+{
+    if (c->step == HTTP_CONN_RUNNABLE) {
+        submit(l, c, HTTP_CONN_WAKE_INTERNAL);
+    } else if (apply_interest(l, c, c->step) != 0) {
+        conn_error(l, c);
     }
 }
 
-static void run_conn(loop *l, conn *c, int wake)
+/* 완료 큐에서 꺼낸 연결: FINISHED면 끝, 보존 차례가 남았으면 다음 차례, 아니면 마지막 결과대로. */
+static void collect(loop *l, conn *c)
 {
-    http_conn_step step = http_conn_run(&c->http, wake, now_ns());
+    c->busy = 0;
+    if (c->step == HTTP_CONN_FINISHED) {
+        mark_finished(l, c);
+    } else if (!submit_next_cause(l, c)) {
+        settle(l, c);
+    }
+}
 
-    if (step == HTTP_CONN_FINISHED) {
-        mark_finished(l, c);
-        return;
+/* 배치의 알림 하나를 연결의 보존 차례로 더한다(원인을 합치지 않는다). */
+static void add_cause(loop *l, conn *c, int wake, int backend, unsigned gen)
+{
+    if (c->ncauses == 0) {
+        c->touch_next = NULL;
+        if (l->touch_tail != NULL) {
+            l->touch_tail->touch_next = c;
+        } else {
+            l->touch_head = c;
+        }
+        l->touch_tail = c;
     }
-    if (step == HTTP_CONN_RUNNABLE) {
-        enqueue(l, c);
-        return;
-    }
-    c->waiting = 1;
-    if (apply_interest(l, c, step) != 0) {
-        c->http.result = HTTP_CONN_ERROR; /* 등록 변경 실패는 그 연결 ERROR(D-57, D-67) */
-        c->http.err = errno;
-        mark_finished(l, c);
-    }
+    assert(c->ncauses < 2); /* 소켓마다 알림은 배치에 한 번이다 */
+    c->causes[c->ncauses].wake = wake;
+    c->causes[c->ncauses].backend = backend;
+    c->causes[c->ncauses].gen = gen;
+    c->ncauses++;
 }
 
 /* 새 연결 준비. 실패하면 만든 자원까지 회수하고 그 소켓만 닫는다. */
@@ -187,8 +372,10 @@ static void add_conn(loop *l, int fd)
     c->client_events = EPOLLIN;
     c->backend_events = 0;
     c->backend_reg_gen = 0;
-    c->waiting = 1;
-    c->queued = c->finished = 0;
+    c->ncauses = c->next_cause = 0;
+    c->step = HTTP_CONN_WANT_READ;
+    c->sched = RUN_IDLE;
+    c->busy = c->finished = 0;
     ev.events = EPOLLIN;
     ev.data.ptr = &c->client_tag;
     if (epoll_ctl(l->epfd, EPOLL_CTL_ADD, fd, &ev) != 0) {
@@ -225,19 +412,56 @@ static int accept_some(loop *l)
     return 0;
 }
 
-/* 기다리는 연결의 마감을 확인해 만료시키고, 남은 가장 이른 마감까지의 밀리초를 돌려준다(없으면 -1). */
+/* eventfd를 비운다(EINTR 다시, EAGAIN 무시). 그 밖은 서버를 끝내는 실패로 -1. */
+static int drain_eventfd(loop *l)
+{
+    uint64_t v;
+
+    for (;;) {
+        if (read(l->p.evfd, &v, sizeof(v)) == (ssize_t)sizeof(v) || errno == EAGAIN) {
+            return 0;
+        }
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
+}
+
+/* 완료 큐를 모두 꺼내 회수한다. 실행 상태는 잠금 안에서 바꾸고, HTTP·등록 처리는 잠금 밖에서 한다. */
+static void collect_done(loop *l)
+{
+    conn *c, *list;
+
+    pthread_mutex_lock(&l->p.lock);
+    list = l->p.done_head;
+    l->p.done_head = l->p.done_tail = NULL;
+    for (c = list; c != NULL; c = c->q_next) {
+        assert(c->sched == RUN_DONE);
+        c->sched = RUN_IDLE;
+    }
+    pthread_mutex_unlock(&l->p.lock);
+    while (list != NULL) {
+        c = list;
+        list = c->q_next; /* collect가 다시 넣으면 q_next가 바뀐다 */
+        collect(l, c);
+    }
+}
+
+/* 대기 중인(바쁘지 않은) 연결의 마감을 확인해 만료시키고, 남은 가장 이른 마감까지의 밀리초를 돌려준다(없으면 -1). */
 static int check_deadlines(loop *l)
 {
     long long now = now_ns(), earliest = LLONG_MAX;
     conn *c;
 
     for (c = l->all; c != NULL; c = c->next) {
-        if (c->finished || !c->waiting) {
+        if (c->finished || c->busy) {
             continue;
         }
         if (http_conn_expired(&c->http, now)) {
-            if (http_conn_expire(&c->http) == HTTP_CONN_RUNNABLE) {
-                enqueue(l, c); /* 커밋 전 백엔드 만료: 504 순서로 다음 회차에 실행(D-67) */
+            if (unregister(l, c) != 0) { /* 만료 전에 지운다: 커밋 전 백엔드 만료는 백엔드를 닫는다 */
+                conn_error(l, c);
+            } else if ((c->step = http_conn_expire(&c->http)) == HTTP_CONN_RUNNABLE) {
+                submit(l, c, HTTP_CONN_WAKE_INTERNAL); /* 커밋 전 백엔드 만료: 504 순서(D-67) */
             } else {
                 mark_finished(l, c);
             }
@@ -258,6 +482,7 @@ static void reap(loop *l)
     while (l->done != NULL) {
         conn *c = l->done;
         l->done = c->done_next;
+        assert(!c->busy);
         if (c->http.result == HTTP_CONN_ERROR) {
             fprintf(stderr, "연결 오류로 닫음: %s\n", strerror(c->http.err));
         }
@@ -275,18 +500,28 @@ static void reap(loop *l)
     }
 }
 
-/* 서버를 끝낼 때 남은 연결을 닫고 해제한다. */
+/* 서버를 끝낼 때: 워커를 멈춘 뒤(join) 남은 연결을 닫고 해제하고, eventfd·잠금·epoll을 정리한다. */
 static int fail(loop *l, const char *step, char *error, size_t error_size)
 {
     int saved = errno;
 
     snprintf(error, error_size, "%s 실패: %s", step, strerror(saved));
+    stop_workers(l);
     while (l->all != NULL) {
         conn *c = l->all;
         l->all = c->next;
         http_conn_release(&c->http);
         close(c->http.fd);
         free(c);
+    }
+    if (l->p.evfd >= 0) {
+        close(l->p.evfd);
+    }
+    if (l->cond_ready) {
+        pthread_cond_destroy(&l->p.cond);
+    }
+    if (l->lock_ready) {
+        pthread_mutex_destroy(&l->p.lock);
     }
     if (l->epfd >= 0) {
         close(l->epfd);
@@ -295,17 +530,58 @@ static int fail(loop *l, const char *step, char *error, size_t error_size)
     return -1;
 }
 
+/* 시작 준비: eventfd·잠금·조건 변수·워커. 실패면 errno를 두고 -1과 단계 이름. */
+static int start_pool(loop *l, const char **step)
+{
+    struct epoll_event ev;
+    int rc, i;
+
+    *step = "eventfd";
+    l->p.evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (l->p.evfd < 0) {
+        return -1;
+    }
+    ev.events = EPOLLIN;
+    ev.data.ptr = &evfd_tag;
+    *step = "epoll_ctl(eventfd)";
+    if (epoll_ctl(l->epfd, EPOLL_CTL_ADD, l->p.evfd, &ev) != 0) {
+        return -1;
+    }
+    *step = "큐 잠금 준비";
+    if ((rc = pthread_mutex_init(&l->p.lock, NULL)) != 0) {
+        errno = rc;
+        return -1;
+    }
+    l->lock_ready = 1;
+    if ((rc = pthread_cond_init(&l->p.cond, NULL)) != 0) {
+        errno = rc;
+        return -1;
+    }
+    l->cond_ready = 1;
+    *step = "워커 스레드 만들기";
+    for (i = 0; i < LOOP_WORKERS; i++) {
+        if ((rc = pthread_create(&l->workers[i], NULL, worker_main, &l->p)) != 0) {
+            errno = rc;
+            return -1; /* 만든 워커는 fail이 멈추고 join한다 */
+        }
+        l->nworkers++;
+    }
+    return 0;
+}
+
 int server_loop_run(int listen_fd, const char *root, route_table *routes, char *error, size_t error_size)
 {
     struct epoll_event events[LOOP_MAX_EVENTS], ev;
     unsigned gens[LOOP_MAX_EVENTS]; /* 배치를 받은 직후 복사한 백엔드 세대(D-67) */
     loop l;
     int timeout = -1, flags;
+    const char *step;
 
     memset(&l, 0, sizeof(l));
     l.listen_fd = listen_fd;
     l.root = root;
     l.routes = routes;
+    l.p.evfd = -1;
     l.epfd = epoll_create1(0);
     if (l.epfd < 0) {
         return fail(&l, "epoll_create1", error, error_size);
@@ -319,53 +595,65 @@ int server_loop_run(int listen_fd, const char *root, route_table *routes, char *
     if (epoll_ctl(l.epfd, EPOLL_CTL_ADD, listen_fd, &ev) != 0) {
         return fail(&l, "epoll_ctl(듣는 소켓)", error, error_size);
     }
+    if (start_pool(&l, &step) != 0) {
+        return fail(&l, step, error, error_size);
+    }
     for (;;) {
-        conn *runnable = l.run_head; /* 회차 시작 때 목록. 이번 회차에 새로 실행 가능해진 연결은 다음 회차로 간다 */
-        int n, i;
+        int n, i, woke = 0;
+        conn *c;
 
-        l.run_head = l.run_tail = NULL;
-        n = epoll_wait(l.epfd, events, LOOP_MAX_EVENTS, runnable != NULL ? 0 : timeout);
+        n = epoll_wait(l.epfd, events, LOOP_MAX_EVENTS, timeout);
         if (n < 0) {
             if (errno != EINTR) {
                 return fail(&l, "epoll_wait", error, error_size);
             }
             n = 0;
         }
-        for (i = 0; i < n; i++) { /* 아무것도 실행하기 전에 백엔드 알림의 세대를 복사한다 */
+        for (i = 0; i < n; i++) { /* 아무것도 넣기 전에 백엔드 알림의 세대를 복사한다 */
             tag *t = events[i].data.ptr;
-            gens[i] = t != NULL ? t->owner->http.be_gen : 0;
+            gens[i] = t != NULL && t->owner != NULL ? t->owner->http.be_gen : 0;
         }
-        for (i = 0; i < n; i++) { /* HUP·ERR도 깨우는 정보일 뿐이라 같은 차례 실행으로 다룬다(D-57) */
+        l.touch_head = l.touch_tail = NULL;
+        for (i = 0; i < n; i++) { /* 연결별로 알림마다 차례를 배치 순서대로 보존한다. HUP·ERR도 깨우는 정보다(D-57) */
             tag *t = events[i].data.ptr;
-            conn *c;
             if (t == NULL) {
                 if (accept_some(&l) != 0) {
                     return fail(&l, "accept", error, error_size);
                 }
                 continue;
             }
+            if (t == &evfd_tag) {
+                woke = 1;
+                continue;
+            }
             c = t->owner;
+            assert(!c->busy); /* 바쁜 연결은 등록이 없다 */
             if (c->finished) {
                 continue;
             }
             if (!t->backend) {
-                run_conn(&l, c, HTTP_CONN_WAKE_CLIENT);
+                add_cause(&l, c, HTTP_CONN_WAKE_CLIENT, 0, 0);
             } else if (c->http.be_gen == gens[i] && c->http.be_fd >= 0) { /* 세대가 바뀌었으면 옛 소켓 알림이다 */
                 unsigned e = events[i].events;
-                run_conn(&l, c,
-                         (e & EPOLLIN ? HTTP_CONN_WAKE_BACKEND_IN : 0) | (e & EPOLLOUT ? HTTP_CONN_WAKE_BACKEND_OUT : 0) |
-                             (e & (EPOLLERR | EPOLLHUP) ? HTTP_CONN_WAKE_BACKEND_ERR : 0));
+                add_cause(&l, c,
+                          (e & EPOLLIN ? HTTP_CONN_WAKE_BACKEND_IN : 0) | (e & EPOLLOUT ? HTTP_CONN_WAKE_BACKEND_OUT : 0) |
+                              (e & (EPOLLERR | EPOLLHUP) ? HTTP_CONN_WAKE_BACKEND_ERR : 0),
+                          1, gens[i]);
             }
         }
-        while (runnable != NULL) {
-            conn *c = runnable;
-            runnable = c->run_next;
-            c->queued = 0;
-            if (!c->finished && !c->waiting) { /* 그사이 알림 실행으로 대기로 바뀌었으면 건너뛴다(D-67) */
-                run_conn(&l, c, HTTP_CONN_WAKE_INTERNAL);
+        for (c = l.touch_head; c != NULL; c = c->touch_next) { /* 유효 등록을 지우고 첫 차례를 넣는다 */
+            c->next_cause = 0;
+            if (unregister(&l, c) != 0) {
+                conn_error(&l, c);
+            } else if (!submit_next_cause(&l, c)) {
+                settle(&l, c);
             }
         }
-        timeout = check_deadlines(&l);
-        reap(&l); /* 끝난 연결은 새 실행 목록에 없다: 목록에는 RUNNABLE을 돌려준(끝나지 않은) 연결만 들어간다 */
+        if (woke && drain_eventfd(&l) != 0) { /* 읽은 뒤에 완료 큐를 비운다: 깨우기 손실 없음 */
+            return fail(&l, "eventfd 읽기", error, error_size);
+        }
+        collect_done(&l); /* eventfd 결과와 관계없이 매 회차 비운다 */
+        timeout = check_deadlines(&l); /* 방금 다시 등록한 연결도 확인한다(D-59) */
+        reap(&l);
     }
 }

@@ -9,6 +9,9 @@ AGENTS.md
 # 빌드 산출물
 /webserver
 /webserver-debug
+/webserver-tsan
+/tests/test_route-tsan
+/tests/test_server_loop-tsan
 /tests/test_options
 /tests/test_echo
 /tests/test_http_parser

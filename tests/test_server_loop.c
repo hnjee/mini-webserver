@@ -4,6 +4,9 @@
  * - accept 재시도 오류는 링크 단계 -Wl,--wrap=accept4로 주입한다(제품 코드에는 시험용 분기가 없다).
  * - 끝난 연결 fd 재사용은 결정적으로 재현하지 않는다. 같은 회차에 끝나는 연결과 새 연결을 섞은 부하에서
  *   연결별 응답 정확성과 서버 생존·AddressSanitizer 보고 없음으로 본다.
+ * 워커 확장(docs/extensions/worker-pool): epoll_wait·pthread_create도 --wrap으로 주입한다.
+ * - epoll_wait 관문: 시험이 루프를 epoll_wait 직전에 세워 두고 두 소켓을 함께 준비시켜 같은 배치를 만든다.
+ * - epoll_wait 실패·워커 일부 생성 실패: 루프가 -1로 돌아오고, 자식이 exit()로 끝나 LeakSanitizer 누수 확인까지 한다.
  */
 #define _GNU_SOURCE /* accept4 */
 
@@ -15,10 +18,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -53,6 +59,49 @@ int __wrap_accept4(int fd, struct sockaddr *addr, socklen_t *len, int flags)
         wrap_successes++;
     }
     return r;
+}
+
+/* ---- epoll_wait 주입: fail_at번째 호출을 EIO로 실패시킨다. 관문이 켜져 있으면 'P'를 받은 뒤 'R'까지 멈춘다 ---- */
+static long wrap_epoll_fail_at = -1; /* -1이면 주입 없음 */
+static long wrap_epoll_calls;
+static int gate_r = -1, gate_w = -1, ack_r = -1, ack_w = -1;
+
+int __real_epoll_wait(int epfd, struct epoll_event *events, int max, int timeout);
+int __wrap_epoll_wait(int epfd, struct epoll_event *events, int max, int timeout);
+
+int __wrap_epoll_wait(int epfd, struct epoll_event *events, int max, int timeout)
+{
+    char ch;
+    if (++wrap_epoll_calls == wrap_epoll_fail_at) {
+        errno = EIO;
+        return -1;
+    }
+    while (gate_r >= 0 && read(gate_r, &ch, 1) == 1) { /* gate_r는 논블로킹 */
+        if (ch == 'P') {
+            struct pollfd p = {gate_r, POLLIN, 0};
+            if (write(ack_w, "p", 1) != 1) {
+                _exit(4);
+            }
+            while (poll(&p, 1, -1) < 0 || read(gate_r, &ch, 1) != 1 || ch != 'R') {
+            }
+        }
+    }
+    return __real_epoll_wait(epfd, events, max, timeout);
+}
+
+/* ---- pthread_create 주입: fail_at번째 호출을 EAGAIN으로 실패시킨다 ---- */
+static long wrap_thread_fail_at = -1;
+static long wrap_thread_calls;
+
+int __real_pthread_create(pthread_t *t, const pthread_attr_t *a, void *(*fn)(void *), void *arg);
+int __wrap_pthread_create(pthread_t *t, const pthread_attr_t *a, void *(*fn)(void *), void *arg);
+
+int __wrap_pthread_create(pthread_t *t, const pthread_attr_t *a, void *(*fn)(void *), void *arg)
+{
+    if (++wrap_thread_calls == wrap_thread_fail_at) {
+        return EAGAIN;
+    }
+    return __real_pthread_create(t, a, fn, arg);
 }
 
 static void check(const char *name, int condition, const char *detail)
@@ -128,7 +177,8 @@ static pid_t start_server(void)
         alarm(30);
         server_loop_run(fd, root, loop_routes, error, sizeof(error));
         fprintf(stderr, "루프 끝: %s\n", error);
-        _exit(1);
+        close(fd);
+        exit(1); /* _exit가 아니다: LeakSanitizer가 해제 누락을 보고하게 한다 */
     }
     close(fd);
     return pid;
@@ -154,8 +204,8 @@ static void stop_server(const char *name, pid_t pid)
     if (fd >= 0) {
         close(fd);
     }
-    snprintf(label, sizeof(label), "%s: AddressSanitizer 보고 없음", name);
-    check(label, strstr(buf, "AddressSanitizer") == NULL, "ASan 보고가 있다");
+    snprintf(label, sizeof(label), "%s: Sanitizer 보고 없음", name);
+    check(label, strstr(buf, "Sanitizer") == NULL, "ASan·TSan 보고가 있다");
 }
 
 static int dial(void)
@@ -539,7 +589,7 @@ static void test_proxy_504_502_concurrent(void)
     int silent_port, closed_port, silent = tcp_listen(&silent_port), closed = tcp_listen(&closed_port);
     char text[160], status[16], body[256];
     struct timespec t0;
-    double static_s, timeout_s;
+    double static_s = -1, timeout_s;
     pid_t pid;
     int a, b;
 
@@ -581,11 +631,187 @@ static void test_proxy_504_502_concurrent(void)
     stop_server("TC-6-13 504·502", pid);
 }
 
+/* ---- 워커 확장(docs/extensions/worker-pool) ---- */
+
+/* 주입으로 끝나야 하는 서버: timeout 초 안에 끝나는지 보고 로그를 log에 담는다. 끝나지 않으면 죽이고 -1. */
+static int wait_exit(pid_t pid, double timeout, char *log, size_t cap)
+{
+    struct timespec gap = {0, 20 * 1000 * 1000};
+    int status = -1, tries = (int)(timeout / 0.02), fd;
+    ssize_t n;
+
+    while (tries-- > 0 && waitpid(pid, &status, WNOHANG) == 0) {
+        nanosleep(&gap, NULL);
+    }
+    if (tries < 0) {
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        status = -1;
+    }
+    fd = open(log_path, O_RDONLY);
+    n = fd >= 0 ? read(fd, log, cap - 1) : -1;
+    log[n > 0 ? n : 0] = '\0';
+    if (fd >= 0) {
+        close(fd);
+    }
+    return status;
+}
+
+/* 업로드 중 같은 배치에 클라이언트 본문·백엔드 응답 머리 일부가 함께 오고 마감이 이미 지났다.
+ * 알림마다 한 차례씩이면 클라이언트 본문 read가 진행으로 마감을 다시 잡아 연결이 살아남는다.
+ * 두 원인을 한 차례로 합치면 백엔드 read가 예산을 써 본문 read가 빠지고, 같은 회차 마감 확인에서 닫힌다. */
+static void test_same_batch_client_and_backend(void)
+{
+    int port, bl = tcp_listen(&port), pg[2], pa[2], a, be, flags;
+    char text[96], req[8192], status[16], body[64], ch;
+    size_t have = 0, body_seen = 0;
+    pid_t pid;
+    struct timeval tv = {12, 0};
+
+    snprintf(text, sizeof(text), "route /up/ 127.0.0.1:%d\n", port);
+    set_routes(text);
+    setup_or_die(pipe(pg) == 0 && pipe(pa) == 0, "pipe");
+    flags = fcntl(pg[0], F_GETFL);
+    setup_or_die(flags >= 0 && fcntl(pg[0], F_SETFL, flags | O_NONBLOCK) == 0, "O_NONBLOCK");
+    gate_r = pg[0];
+    ack_w = pa[1];
+    pid = start_server();
+    close(pg[0]);
+    close(pa[1]);
+    gate_r = ack_w = -1;
+    gate_w = pg[1];
+    ack_r = pa[0];
+
+    a = dial();
+    setsockopt(a, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    write_all(a, "POST /up/x HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nAB");
+    be = accept(bl, NULL, NULL);
+    setup_or_die(be >= 0, "accept backend");
+    setsockopt(be, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    while (have < sizeof(req) - 1) { /* 머리와 본문 AB까지 받는다 */
+        ssize_t r = read(be, req + have, sizeof(req) - 1 - have);
+        char *end;
+        setup_or_die(r > 0, "backend read");
+        have += (size_t)r;
+        req[have] = '\0';
+        end = strstr(req, "\r\n\r\n");
+        if (end != NULL && have - (size_t)(end + 4 - req) >= 2) {
+            body_seen = have - (size_t)(end + 4 - req);
+            break;
+        }
+    }
+    {
+        struct timespec settle = {0, 300 * 1000 * 1000};
+        int wake;
+        nanosleep(&settle, NULL); /* 서버가 본문 대기(클라이언트·백엔드 읽기 등록)로 들어갈 시간 */
+        setup_or_die(write(gate_w, "P", 1) == 1, "gate P");
+        wake = dial(); /* 루프를 epoll_wait 밖으로 한 번 꺼내 관문에 세운다 */
+        setup_or_die(read(ack_r, &ch, 1) == 1, "gate ack");
+        sleep(6); /* 업로드 대기 마감(5초)이 지나도록 */
+        write_all(a, "CDE");
+        write_all(be, "HTTP/1.0 200 OK\r\n");
+        setup_or_die(write(gate_w, "R", 1) == 1, "gate R");
+        write_all(a, "FGHIJ");
+        while (body_seen < 10) {
+            ssize_t r = read(be, req, sizeof(req));
+            if (r <= 0) {
+                break;
+            }
+            body_seen += (size_t)r;
+        }
+        write_all(be, "Content-Length: 4\r\n\r\nOKAY");
+        close(be);
+        check("워커 확장 같은 배치 클라이언트+백엔드(마감 지남): 본문 끝까지 업로드되고 200 OKAY",
+              body_seen == 10 && read_response(a, status, body, sizeof(body)) == 0 &&
+                  strcmp(status, "HTTP/1.1 200") == 0 && strcmp(body, "OKAY") == 0,
+              body_seen == 10 ? "응답이 없거나 다르다(마감으로 닫힘)" : "백엔드가 본문을 다 받지 못했다");
+        close(wake);
+    }
+    close(a);
+    close(bl);
+    close(gate_w);
+    close(ack_r);
+    gate_w = ack_r = -1;
+    stop_server("워커 확장 같은 배치", pid);
+    loop_routes = NULL;
+}
+
+/* 깨우기 손실 없음: 한 연결의 짧은 요청 1000개가 각각 1초 안에 끝난다(손실이면 다른 깨움 없이 멈춘다). */
+static void test_sequential_wakeups(void)
+{
+    enum { N = 1000 };
+    pid_t pid = start_server();
+    int fd = dial(), i, ok = 0;
+    double worst = 0;
+    char label[160];
+
+    for (i = 0; i < N; i++) {
+        struct timespec t0;
+        double s;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        write_all(fd, "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+        if (read_ok_responses(fd, 1) != 1) {
+            break;
+        }
+        s = seconds_since(&t0);
+        worst = s > worst ? s : worst;
+        ok++;
+    }
+    close(fd);
+    snprintf(label, sizeof(label), "워커 확장 한 연결 짧은 요청 %d개 모두 1초 안(최대 %.4f초)", N, worst);
+    check(label, ok == N && worst < 1.0, "응답이 늦거나 멈췄다");
+    stop_server("워커 확장 깨우기", pid);
+}
+
+/* 부하 중 epoll_wait 실패 주입: 루프가 워커를 멈추고 모두 해제한 뒤 -1로 돌아온다(교착·누수·ASan 없음). */
+static void test_fatal_epoll_wait(void)
+{
+    enum { CLIENTS = 40 };
+    int fds[CLIENTS], i, status;
+    char log[4096];
+    pid_t pid;
+
+    wrap_epoll_fail_at = 10;
+    pid = start_server();
+    for (i = 0; i < CLIENTS; i++) {
+        fds[i] = dial();
+        write_all(fds[i], "GET / HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    }
+    status = wait_exit(pid, 5.0, log, sizeof(log));
+    for (i = 0; i < CLIENTS; i++) {
+        close(fds[i]);
+    }
+    wrap_epoll_fail_at = -1;
+    check("워커 확장 부하 중 epoll_wait 실패 → 5초 안에 exit 1(교착 없음)", status >= 0 && WIFEXITED(status) &&
+                                                                         WEXITSTATUS(status) == 1,
+          "끝나지 않았거나 다른 종료");
+    check("워커 확장 epoll_wait 실패 이유가 로그에 있음", strstr(log, "epoll_wait 실패") != NULL, log);
+    check("워커 확장 epoll_wait 실패 뒤 Sanitizer(누수 포함) 보고 없음", strstr(log, "Sanitizer") == NULL, log);
+}
+
+/* 시작 때 워커 일부만 만들어짐(3번째 pthread_create 실패): 만든 워커만 join하고 -1로 돌아온다. */
+static void test_partial_workers(void)
+{
+    int status;
+    char log[4096];
+    pid_t pid;
+
+    wrap_thread_fail_at = 3;
+    pid = start_server();
+    status = wait_exit(pid, 5.0, log, sizeof(log));
+    wrap_thread_fail_at = -1;
+    check("워커 확장 워커 3번째 생성 실패 → 5초 안에 exit 1", status >= 0 && WIFEXITED(status) &&
+                                                               WEXITSTATUS(status) == 1,
+          "끝나지 않았거나 다른 종료");
+    check("워커 확장 워커 생성 실패 이유가 로그에 있음", strstr(log, "워커 스레드 만들기 실패") != NULL, log);
+    check("워커 확장 워커 생성 실패 뒤 Sanitizer(누수 포함) 보고 없음", strstr(log, "Sanitizer") == NULL, log);
+}
+
 int main(void)
 {
-    alarm(60);
+    alarm(120);
     signal(SIGPIPE, SIG_IGN); /* D-05: 서버와 같은 조건 */
-    printf("test_server_loop (TC-5-11, TC-6-13 루프 범위)\n");
+    printf("test_server_loop (TC-5-11, TC-6-13 루프 범위, 워커 확장)\n");
     build_root();
     test_hup_with_pending_input();
     test_many_ready();
@@ -594,6 +820,10 @@ int main(void)
     test_proxy_round_robin_and_churn();
     test_proxy_504_502_concurrent();
     loop_routes = NULL;
+    test_same_batch_client_and_backend();
+    test_sequential_wakeups();
+    test_fatal_epoll_wait();
+    test_partial_workers();
     remove_root();
 
     if (failures > 0) {

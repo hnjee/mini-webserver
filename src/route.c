@@ -131,7 +131,7 @@ static int parse_line(const char *s, size_t n, int line, route_table *out, char 
     r->prefix[len[1]] = '\0';
     r->prefix_len = len[1];
     r->backend_count = 0;
-    r->next = 0;
+    atomic_init(&r->next, 0);
     r->line = line;
     for (i = 2; i < count; i++) {
         if (parse_backend(tok[i], len[i], &r->backends[r->backend_count], line, error, size) != 0) {
@@ -252,5 +252,5 @@ const char *route_forward_target(const route_rule *rule, const char *target)
 
 const route_backend *route_pick(route_rule *rule)
 {
-    return &rule->backends[rule->next++ % rule->backend_count];
+    return &rule->backends[atomic_fetch_add_explicit(&rule->next, 1, memory_order_relaxed) % rule->backend_count];
 }
