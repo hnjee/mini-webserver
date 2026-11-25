@@ -298,6 +298,21 @@ flowchart LR
 | 메모리 검사                       |        |        |        |        |
 | 코드 구조와 가독성                |        |        |        |        |
 
+### 임동호 구현 결과 (2026-11-26)
+
+| 기준 | 결과 |
+| --- | --- |
+| 동시성 방식 | 워커 스레드 N개(기본 코어 × 2), 워커마다 epoll 하나. 리슨 소켓은 `EPOLLEXCLUSIVE`로 공유 |
+| Step 1~5 통과 | 통과 (단위 테스트 전체, `ab -n 2000 -c 200` 실패 0) |
+| 부하 (Requests/sec, 실패 수) | `wrk -t4 -c100 -d10s /index.html` 약 109,000, 실패 0 / `ab -n 20000 -c 200` 약 29,000, 실패 0 |
+| Step 6~7 통과 | 통과. 프록시 라운드 로빈·502·504, 우아한 종료(Ctrl+C 두 번이면 바로), 헤더 30초 408, 접근 로그, fd 바닥 시 accept 1초 쉬기 |
+| 메모리 검사 | ASan·UBSan(`make test-debug`, `make debug` 서버 Ctrl+C) 보고 없음, valgrind `All heap blocks were freed`, `ERROR SUMMARY: 0` |
+| 코드 구조와 가독성 | `server.c`(루프·워커·종료), `conn.c`(연결 상태), `respond.c`, `http.c`, `file.c`, `route.c`, `proxy.c`, `log.c`. 테스트 파일 9개, 확인 약 340개 |
+
+- 측정 환경: 클라우드 리눅스 2코어, 일반 빌드(`make`), 루트 `/tmp/www`. 윈도우 폴더 연결을 루트로 쓰면 파일 읽기가 느려서 초당 약 230건에서 막혀요.
+- `TCP_NODELAY`를 켜기 전에는 `wrk` 결과가 약 2,270이었어요. 헤더와 파일을 따로 `write()`하면 Nagle 알고리즘과 지연 ACK가 겹쳐 요청마다 약 40ms가 걸렸어요 (`docs/design/step7.md` 7장).
+- 자세한 측정: `docs/tests/step7.md` 3장
+
 **선택 기준 (우선순위)**: 정확성 → 안정성 → 성능 → 구조
 
 **최종 선택**: (코드 / 이유 / 다른 구현에서 가져올 점)

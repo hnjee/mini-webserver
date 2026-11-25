@@ -22,7 +22,7 @@ enum conn_state {
 };
 
 /* epoll에 맡기는 손잡이. 알림이 리슨 소켓, 클라이언트 소켓, 백엔드 소켓 중 어디서 왔는지 알려 줘요 (step6.md 3장) */
-enum handle_kind { H_LISTEN, H_CLIENT, H_BACKEND };
+enum handle_kind { H_LISTEN, H_CLIENT, H_BACKEND, H_STOP };
 
 struct conn;
 
@@ -65,6 +65,15 @@ struct conn {
     unsigned cli_events, back_events; /* 지금 epoll에 걸어 둔 일 */
     int cli_halfclosed;           /* 클라이언트가 쓰기만 닫았으면 1 (EPOLLRDHUP을 더는 안 봄) */
 
+    /* ---- 안정성과 접근 로그 (Step 7) ---- */
+    time_t req_start;             /* 이 요청의 첫 바이트가 온 시각. 헤더 30초 상한에 써요 (S7-04) */
+    char ip[16];                  /* 클라이언트 IPv4 주소 (로그용) */
+    int status;                   /* 보내는 응답의 상태 코드. 0이면 아직 모름 */
+    size_t bytes_out;             /* 이번 응답에서 클라이언트에 보낸 바이트 수 */
+    struct timespec t_req;        /* 요청 헤더를 다 받은 시각 (처리 시간용) */
+    int has_req;                  /* 요청 줄을 파싱했으면 1 (로그에 요청 줄을 남김) */
+    int log_pending;              /* 아직 로그를 안 남긴 응답이 있으면 1 */
+
     int closed;                   /* 닫혔으면 1. 이번 바퀴가 끝나면 해제해요 */
     struct conn *prev, *next;     /* 열린 연결 리스트 (닫히면 해제 대기 리스트) */
 };
@@ -81,6 +90,14 @@ struct server {
     struct routes *routes;        /* 라우팅 표. NULL이면 프록시 없음 (server_init 뒤에 넣어요) */
     int connect_timeout;          /* 백엔드 연결 시간 제한(초), 기본 PROXY_CONNECT_TIMEOUT_SEC */
     int response_timeout;         /* 백엔드 응답 시간 제한(초), 기본 PROXY_RESPONSE_TIMEOUT_SEC */
+
+    /* ---- 종료와 accept 쉬기 (Step 7) ---- */
+    int stop_fd;                  /* 종료 알림 eventfd. 없으면 -1 */
+    struct handle h_stop;         /* 종료 알림 손잡이 */
+    int stopping;                 /* 종료 중이면 1: 새 연결 안 받고, 응답 뒤에 닫아요 */
+    time_t stop_at;               /* 종료를 시작한 시각 */
+    int accept_paused;            /* fd가 바닥나 리슨 소켓 감시를 쉬는 중이면 1 (S7-05) */
+    time_t accept_resume;         /* 이 시각부터 다시 받아요 */
 };
 
 #define MAX_EVENTS 64             /* epoll_wait() 한 번에 받는 최대 개수 */
@@ -91,6 +108,9 @@ struct server {
 #define PROXY_CONNECT_TIMEOUT_SEC 3   /* 백엔드 연결 시간 제한 (S6-07) */
 #define PROXY_RESPONSE_TIMEOUT_SEC 10 /* 백엔드 응답 시간 제한 (S6-07) */
 #define WORKERS_MAX 256           /* -t 상한 (S6-01) */
+#define HEADER_TIMEOUT_SEC 30     /* 요청 헤더를 이 안에 다 못 받으면 408 (S7-04) */
+#define SHUTDOWN_GRACE_SEC 5      /* 종료 신호 뒤 하던 응답을 기다리는 최대 시간 (S7-02) */
+#define ACCEPT_PAUSE_SEC 1        /* fd가 바닥나면 리슨 소켓 감시를 쉬는 시간 (S7-05) */
 
 /* 리슨 소켓을 준비해요. 성공하면 fd, 실패하면 -1 (이유 출력, 소켓 닫음) */
 int server_listen(int port);
@@ -123,11 +143,23 @@ void server_close_conn(struct server *s, struct conn *c);
 /* 연결을 모두 닫고 epoll을 닫아요. 리슨 소켓은 닫지 않아요 */
 void server_free(struct server *s);
 
+/* 종료 알림 eventfd를 epoll에 등록해요. 읽을 수 있게 되면 server_begin_stop()을 불러요. 성공 0, 실패 -1 */
+int server_watch_stop(struct server *s, int stop_fd);
+
+/* 종료를 시작해요: 리슨 소켓 감시를 끊고, 요청을 기다리며 쉬는 연결을 닫아요.
+   하던 요청은 응답까지 보낸 뒤 닫아요 (keep-alive 안 함). 닫은 연결 수를 돌려줘요 (S7-02) */
+int server_begin_stop(struct server *s, time_t now);
+
+/* 워커가 루프를 끝내도 되면 1: 종료 중이고, 연결이 다 닫혔거나 SHUTDOWN_GRACE_SEC가 지났을 때 */
+int server_should_exit(const struct server *s, time_t now);
+
 /* epoll_wait()를 한 번 부르고 알림을 처리해요. 닫힌 conn도 여기서 해제해요. 처리한 알림 수, 실패하면 -1 */
 int server_poll_once(struct server *s, int timeout_ms);
 
-/* 워커 스레드 nworkers개를 띄워 각자 server_init 후 epoll 루프를 돌려요. 메인 스레드는 기다리기만 해요.
-   root_real은 정적 파일 루트의 실제 위치, routes는 NULL이면 프록시 없음. 돌아오지 않아요 */
+/* 워커 스레드 nworkers개를 띄워 각자 server_init 후 epoll 루프를 돌려요.
+   메인 스레드만 SIGINT·SIGTERM을 받아요. 한 번 오면 워커들에 종료를 알리고, 다 끝나면 돌아와요.
+   기다리는 중에 한 번 더 오면 그 자리에서 _exit(130)해요 (S7-02, S7-03).
+   root_real은 정적 파일 루트의 실제 위치, routes는 NULL이면 프록시 없음 */
 void server_run(int listen_fd, const char *root_real, struct routes *routes, int nworkers);
 
 #endif
