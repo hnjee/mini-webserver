@@ -11,6 +11,8 @@
 #define _GNU_SOURCE /* accept4 */
 
 #include "../src/server_loop.h"
+#include "../src/access_log.h"
+#include "../src/http_conn.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -21,6 +23,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,9 +37,120 @@
 #include <unistd.h>
 
 static int failures;
-static char tmp[256], root[PATH_MAX], sock_path[PATH_MAX], log_path[PATH_MAX]; /* tmp는 mkdtemp의 짧은 경로 */
+static char tmp[256], root[PATH_MAX], sock_path[PATH_MAX], log_path[PATH_MAX], access_path[PATH_MAX]; /* tmp는 mkdtemp의 짧은 경로 */
 static const char index_body[] = "<h1>loop</h1>\n";
 static route_table *loop_routes; /* NULL이면 -c 생략(Step 5와 같음) */
+
+/* TC-7-13: 첫 응답의 마지막 write가 끝난 직후 워커를 멈춘다. */
+static int write_gate_r = -1, write_ack_w = -1;
+static int output_gate_r = -1, output_ack_w = -1;
+static atomic_int output_gate_once, write_gate_once;
+static int progress_w = -1, throttle_output;
+ssize_t __real_write(int fd, const void *buf, size_t count);
+ssize_t __wrap_write(int fd, const void *buf, size_t count)
+{
+    ssize_t n;
+    if (output_gate_r >= 0 && count == 65536 && !atomic_exchange(&output_gate_once, 1)) {
+        char ch;
+        /* 아직 write하지 않은 연결 출력 버퍼 64KB가 보장된다. */
+        if (__real_write(output_ack_w, "U", 1) != 1 || read(output_gate_r, &ch, 1) != 1 || ch != 'R') _exit(7);
+    }
+    n = __real_write(fd, buf, count);
+    if (progress_w >= 0 && n > 0 && count > 0 && ((const char *)buf)[0] == 'B') {
+        if (__real_write(progress_w, "P", 1) != 1) _exit(9);
+    }
+    if (write_gate_r >= 0 && n == (ssize_t)(sizeof(index_body) - 1) &&
+        count == sizeof(index_body) - 1 && memcmp(buf, index_body, count) == 0 &&
+        !atomic_exchange(&write_gate_once, 1)) {
+        char ch;
+        if (__real_write(write_ack_w, "W", 1) != 1 || read(write_gate_r, &ch, 1) != 1 || ch != 'R') _exit(5);
+    }
+    return n;
+}
+
+/* TC-7-13 늦은 신호: 경계 차례 완료를 알린 eventfd를 루프가 읽은 직후(회수 전) 실제 SIGTERM을 낸다. */
+static int late_signal_armed, late_evfd = -1;
+static atomic_int late_boundary_done, late_injected, late_parsed_after;
+/* TC-7-13 admission 마스크 관문: 2 = 마스크 직전 신호, 3 = 마스크 구간 안 신호(보류 → 삽입 뒤 전달). */
+static int mask_mode;
+static atomic_int mask_inserted, mask_handler_ran;
+
+static void mark(const char *s)
+{
+    if (__real_write(2, s, strlen(s)) < 0) _exit(11);
+}
+
+static void stop_handler(int signo)
+{
+    if (mask_mode == 3 && atomic_load(&late_injected)) {
+        atomic_store(&mask_handler_ran, 1);
+        if (!atomic_load(&mask_inserted)) mark("HANDLER_BEFORE_INSERT\n");
+    }
+    server_loop_request_stop(signo);
+}
+
+int __real_pthread_sigmask(int how, const sigset_t *set, sigset_t *old);
+int __wrap_pthread_sigmask(int how, const sigset_t *set, sigset_t *old)
+{
+    int arm = mask_mode && how == SIG_BLOCK && set != NULL && sigismember(set, SIGTERM) == 1 &&
+              atomic_load(&late_boundary_done) && !atomic_load(&late_injected);
+    int restoring = mask_mode == 3 && how == SIG_SETMASK && atomic_load(&late_injected) &&
+                    !atomic_load(&mask_handler_ran);
+    int r;
+    if (arm && mask_mode == 2) {
+        atomic_store(&late_injected, 1);
+        mark("PREMASK_SIGNAL\n");
+        raise(SIGTERM); /* 막기 전: 핸들러가 바로 돌고 admission은 이를 봐야 한다 */
+    }
+    r = __real_pthread_sigmask(how, set, old);
+    if (arm && mask_mode == 3) {
+        atomic_store(&late_injected, 1);
+        mark("INMASK_SIGNAL\n");
+        raise(SIGTERM); /* 막은 뒤: 보류돼야 한다 */
+        if (atomic_load(&mask_handler_ran)) mark("HANDLER_RAN_INSIDE_MASK\n");
+    }
+    if (restoring && atomic_load(&mask_handler_ran)) mark("PENDING_DELIVERED_ON_RESTORE\n");
+    return r;
+}
+
+int __real_pthread_cond_signal(pthread_cond_t *cond);
+int __wrap_pthread_cond_signal(pthread_cond_t *cond)
+{
+    if (mask_mode == 3 && atomic_load(&late_injected)) atomic_store(&mask_inserted, 1); /* submit의 큐 삽입 뒤 호출 */
+    return __real_pthread_cond_signal(cond);
+}
+int __real_eventfd(unsigned int initval, int flags);
+int __wrap_eventfd(unsigned int initval, int flags)
+{
+    int fd = __real_eventfd(initval, flags);
+    if (late_signal_armed) late_evfd = fd;
+    return fd;
+}
+ssize_t __real_read(int fd, void *buf, size_t count);
+ssize_t __wrap_read(int fd, void *buf, size_t count)
+{
+    ssize_t n = __real_read(fd, buf, count);
+    if (late_signal_armed && fd == late_evfd && n > 0 && atomic_load(&late_boundary_done) &&
+        !atomic_exchange(&late_injected, 1)) {
+        static const char mark[] = "LATE_SIGNAL_INJECTED\n";
+        if (__real_write(2, mark, sizeof(mark) - 1) < 0) _exit(11);
+        raise(SIGTERM); /* 루프 스레드에서 collect_done 전에 실제 핸들러가 돈다 */
+    }
+    return n;
+}
+http_conn_step __real_http_conn_run(http_conn *c, int wake, long long now);
+http_conn_step __wrap_http_conn_run(http_conn *c, int wake, long long now)
+{
+    int boundary = c->at_boundary;
+    http_conn_step s;
+    if ((late_signal_armed || mask_mode) && boundary && atomic_load(&late_injected) && !atomic_exchange(&late_parsed_after, 1)) {
+        static const char mark[] = "LATE_NEXT_REQUEST_STARTED\n";
+        if (__real_write(2, mark, sizeof(mark) - 1) < 0) _exit(11);
+    }
+    s = __real_http_conn_run(c, wake, now);
+    if ((late_signal_armed || mask_mode) && c->at_boundary) atomic_store(&late_boundary_done, 1);
+    return s;
+}
 
 /* ---- accept4 주입: 성공 after_success번 뒤 fail_count번 ECONNABORTED(D-07 재시도 오류) ---- */
 static long wrap_after_success = -1; /* -1이면 주입 없음 */
@@ -56,6 +170,10 @@ int __wrap_accept4(int fd, struct sockaddr *addr, socklen_t *len, int flags)
     }
     r = __real_accept4(fd, addr, len, flags);
     if (r >= 0) {
+        if (throttle_output) {
+            int size = 8192;
+            if (setsockopt(r, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) != 0) _exit(10);
+        }
         wrap_successes++;
     }
     return r;
@@ -133,10 +251,21 @@ static void build_root(void)
     snprintf(root, sizeof(root), "%s/www", tmp);
     snprintf(sock_path, sizeof(sock_path), "%s/s", tmp);
     snprintf(log_path, sizeof(log_path), "%s/server.log", tmp);
+    snprintf(access_path, sizeof(access_path), "%s/access.log", tmp);
     setup_or_die(mkdir(root, 0755) == 0, "mkdir www");
     snprintf(p, sizeof(p), "%s/index.html", root);
     fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     setup_or_die(fd >= 0 && write(fd, index_body, sizeof(index_body) - 1) == (ssize_t)sizeof(index_body) - 1, "index");
+    close(fd);
+    snprintf(p, sizeof(p), "%s/big.bin", root);
+    fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    setup_or_die(fd >= 0, "big.bin");
+    {
+        char block[65536];
+        int i;
+        memset(block, 'B', sizeof(block));
+        for (i = 0; i < 64; i++) setup_or_die(write(fd, block, sizeof(block)) == sizeof(block), "big.bin write");
+    }
     close(fd);
 }
 
@@ -175,10 +304,22 @@ static pid_t start_server(void)
         }
         close(log_fd);
         alarm(30);
-        server_loop_run(fd, root, loop_routes, error, sizeof(error));
-        fprintf(stderr, "루프 끝: %s\n", error);
-        close(fd);
-        exit(1); /* _exit가 아니다: LeakSanitizer가 해제 누락을 보고하게 한다 */
+        if (write_gate_r >= 0 || output_gate_r >= 0 || late_signal_armed || mask_mode) {
+            struct sigaction sa = {0};
+            sa.sa_handler = stop_handler;
+            sigemptyset(&sa.sa_mask);
+            if (sigaction(SIGTERM, &sa, NULL) != 0) _exit(6);
+        }
+        if (output_gate_r >= 0) {
+            int log = open(access_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (log < 0 || dup2(log, STDOUT_FILENO) < 0) _exit(8);
+            close(log);
+            setvbuf(stdout, NULL, _IOLBF, 0);
+            access_log_enable();
+        }
+        int rc = server_loop_run(fd, root, loop_routes, error, sizeof(error));
+        if (rc != 0) fprintf(stderr, "루프 끝: %s\n", error);
+        exit(rc == 0 ? 0 : 1); /* _exit가 아니다: LeakSanitizer가 해제 누락을 보고하게 한다 */
     }
     close(fd);
     return pid;
@@ -807,6 +948,268 @@ static void test_partial_workers(void)
     check("워커 확장 워커 생성 실패 뒤 Sanitizer(누수 포함) 보고 없음", strstr(log, "Sanitizer") == NULL, log);
 }
 
+/* 정지 신호를 첫 응답의 마지막 write 완료 직후에 넣고, 둘째 요청은 시작하지 않는다. */
+static void test_shutdown_request_boundary(void)
+{
+    int pg[2], pa[2], fd, status, refused = 0, i;
+    char ch, reply[4096], log[4096];
+    struct sockaddr_un addr = {0};
+    struct timespec gap = {0, 10 * 1000 * 1000};
+    pid_t pid;
+    setup_or_die(pipe(pg) == 0 && pipe(pa) == 0, "boundary pipes");
+    write_gate_r = pg[0];
+    write_ack_w = pa[1];
+    write_gate_once = 0;
+    pid = start_server();
+    close(pg[0]);
+    close(pa[1]);
+    write_gate_r = write_ack_w = -1;
+    fd = dial();
+    write_all(fd, "GET / HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    setup_or_die(read(pa[0], &ch, 1) == 1 && ch == 'W', "첫 응답 마지막 write 관문");
+    setup_or_die(kill(pid, SIGTERM) == 0, "boundary signal");
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
+    for (i = 0; i < 100; i++) {
+        int s = socket(AF_UNIX, SOCK_STREAM, 0);
+        setup_or_die(s >= 0, "boundary socket");
+        if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0 && errno == ECONNREFUSED) refused = 1;
+        close(s);
+        if (refused) break;
+        nanosleep(&gap, NULL);
+    }
+    check("TC-7-13 정지 관문: 워커 회수 전에 accept 중단", refused, "듣는 소켓이 아직 열려 있다");
+    setup_or_die(write(pg[1], "R", 1) == 1, "boundary release");
+    read_until_eof(fd, reply, sizeof(reply));
+    close(fd);
+    status = wait_exit(pid, 3.0, log, sizeof(log));
+    check("TC-7-13 첫 요청만 응답·버퍼 속 둘째 요청은 폐기",
+          strstr(reply, "HTTP/1.1 200") != NULL && strstr(reply + 1, "HTTP/1.1 200") == NULL, reply);
+    check("TC-7-13 바쁜 워커 회수·join·exit 0", status >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+          strstr(log, "Sanitizer") == NULL, log);
+    close(pg[1]);
+    close(pa[0]);
+}
+
+/* F1 회귀: 정지 신호가 epoll_wait 뒤 정지 확인을 지나 완료 eventfd 읽기 직후에 와도 둘째 요청을 시작하지 않는다. */
+static void test_late_signal_before_collect(void)
+{
+    int fd, status, responses = 0;
+    char reply[4096], log[4096];
+    const char *p;
+    pid_t pid;
+    late_signal_armed = 1;
+    pid = start_server();
+    late_signal_armed = 0;
+    fd = dial();
+    write_all(fd, "GET / HTTP/1.1\r\nHost: x\r\n\r\nGET /second HTTP/1.1\r\nHost: x\r\n\r\n");
+    read_until_eof(fd, reply, sizeof(reply));
+    close(fd);
+    status = wait_exit(pid, 3.0, log, sizeof(log));
+    for (p = reply; (p = strstr(p, "HTTP/1.1 ")) != NULL; p++) responses++;
+    check("TC-7-13 늦은 신호 관문 실제 주입", strstr(log, "LATE_SIGNAL_INJECTED") != NULL, log);
+    check("TC-7-13 늦은 신호 뒤 경계 연결 재실행 없음", strstr(log, "LATE_NEXT_REQUEST_STARTED") == NULL, log);
+    check("TC-7-13 늦은 신호(완료 eventfd 읽기 직후): 첫 응답만, 둘째 요청 무응답",
+          responses == 1 && strstr(reply, "HTTP/1.1 200") != NULL, reply);
+    check("TC-7-13 늦은 신호: exit 0·Sanitizer 없음", status >= 0 && WIFEXITED(status) &&
+          WEXITSTATUS(status) == 0 && strstr(log, "Sanitizer") == NULL, log);
+}
+
+/*
+ * F1 잔여: 다음 요청 admission(큐 삽입)은 두 신호를 막은 구간에서 최신 정지를 확인한 뒤 일어난다.
+ * mode 2: 막기 직전에 처리된 신호 → 넣지 않는다(첫 응답만). mode 3: 막은 구간의 신호 → 보류, 삽입 뒤 복원에서 전달(둘째 요청은 이미 받은 요청).
+ */
+static void test_admission_mask(int mode)
+{
+    int fd, status, responses = 0;
+    char reply[4096], log[4096], label[160];
+    const char *p, *name = mode == 2 ? "마스크 직전 신호" : "마스크 구간 신호";
+    pid_t pid;
+    mask_mode = mode;
+    pid = start_server();
+    mask_mode = 0;
+    fd = dial();
+    write_all(fd, "GET / HTTP/1.1\r\nHost: x\r\n\r\nGET /second HTTP/1.1\r\nHost: x\r\n\r\n");
+    read_until_eof(fd, reply, sizeof(reply));
+    close(fd);
+    status = wait_exit(pid, 3.0, log, sizeof(log));
+    for (p = reply; (p = strstr(p, "HTTP/1.1 ")) != NULL; p++) responses++;
+    snprintf(label, sizeof(label), "TC-7-13 %s 관문 실제 주입", name);
+    check(label, strstr(log, mode == 2 ? "PREMASK_SIGNAL" : "INMASK_SIGNAL") != NULL, log);
+    if (mode == 2) {
+        check("TC-7-13 마스크 직전 신호: 둘째 요청 admission 없음·첫 응답만",
+              strstr(log, "LATE_NEXT_REQUEST_STARTED") == NULL && responses == 1, reply);
+    } else {
+        check("TC-7-13 마스크 구간 신호: 구간 안에서는 핸들러 보류",
+              strstr(log, "HANDLER_RAN_INSIDE_MASK") == NULL, log);
+        check("TC-7-13 마스크 구간 신호: 큐 삽입 뒤 마스크 복원에서 전달",
+              strstr(log, "HANDLER_BEFORE_INSERT") == NULL && strstr(log, "PENDING_DELIVERED_ON_RESTORE") != NULL, log);
+        check("TC-7-13 마스크 구간 신호: 이미 받은 둘째 요청은 응답 뒤 닫음",
+              strstr(log, "LATE_NEXT_REQUEST_STARTED") != NULL && responses == 2, reply);
+    }
+    snprintf(label, sizeof(label), "TC-7-13 %s: exit 0·Sanitizer 없음", name);
+    check(label, status >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0 && strstr(log, "Sanitizer") == NULL, log);
+}
+
+/* 출력 버퍼 64KB를 채운 뒤 write 직전에 멈춰 미송신 관문을 만든다(TC-7-01/05/06). */
+static void test_unsent_output_gate(int shutdown)
+{
+    int pg[2], pa[2], fd, status, refused = 0, i, log_fd;
+    char ch, log[4096], access[4096], buf[65536];
+    size_t bytes = 0, head = 0;
+    struct sockaddr_un addr = {0};
+    struct timespec gap = {0, 10 * 1000 * 1000};
+    pid_t pid;
+    setup_or_die(pipe(pg) == 0 && pipe(pa) == 0, "unsent pipes");
+    output_gate_r = pg[0]; output_ack_w = pa[1]; output_gate_once = 0;
+    pid = start_server();
+    close(pg[0]); close(pa[1]);
+    output_gate_r = output_ack_w = -1;
+    fd = dial();
+    write_all(fd, "GET /big.bin HTTP/1.1\r\nHost: x\r\n\r\n");
+    setup_or_die(read(pa[0], &ch, 1) == 1 && ch == 'U', "unsent 64KB gate");
+    check(shutdown ? "TC-7-05/06 서버 측 미송신 출력 관문" : "TC-7-01 서버 측 미송신 출력 관문",
+          ch == 'U', "64KB write 진입 관문 부재");
+    if (shutdown) {
+        setup_or_die(kill(pid, SIGTERM) == 0, "unsent shutdown signal");
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
+        for (i = 0; i < 100; i++) {
+            int s = socket(AF_UNIX, SOCK_STREAM, 0);
+            setup_or_die(s >= 0, "unsent refuse socket");
+            if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0 && errno == ECONNREFUSED) refused = 1;
+            close(s);
+            if (refused) break;
+            nanosleep(&gap, NULL);
+        }
+        check("TC-7-06 정리 중 새 연결 거부", refused, "accept 여전히 열림");
+    } else {
+        close(fd); /* write 전에 출력이 남았다는 사실을 확인한 뒤 끊는다 */
+    }
+    setup_or_die(write(pg[1], "R", 1) == 1, "unsent release");
+    if (shutdown) {
+        ssize_t n;
+        while ((n = read(fd, buf, sizeof(buf))) > 0) {
+            if (bytes == 0) {
+                char *end = memmem(buf, (size_t)n, "\r\n\r\n", 4);
+                if (end) head = (size_t)(end + 4 - buf);
+            }
+            bytes += (size_t)n;
+        }
+        close(fd);
+        status = wait_exit(pid, 6.0, log, sizeof(log));
+        check("TC-7-05 진행 중 다운로드 전체 마무리·exit 0",
+              head > 0 && bytes == head + 4194304 && status >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+              "응답 길이 또는 정상 종료 실패");
+    } else {
+        int c, alive;
+        nanosleep(&gap, NULL);
+        c = dial();
+        write_all(c, "GET / HTTP/1.0\r\n\r\n");
+        read_until_eof(c, buf, sizeof(buf)); close(c);
+        alive = waitpid(pid, &status, WNOHANG) == 0;
+        check("TC-7-01 끊긴 다운로드 뒤 서버 유지·200", alive && strncmp(buf, "HTTP/1.1 200", 12) == 0, buf);
+        kill(pid, SIGTERM);
+        status = wait_exit(pid, 3.0, log, sizeof(log));
+        check("TC-7-01 뒤 정상 종료", status >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0, log);
+    }
+    log_fd = open(access_path, O_RDONLY);
+    i = log_fd >= 0 ? read(log_fd, access, sizeof(access) - 1) : -1;
+    access[i > 0 ? i : 0] = '\0';
+    if (log_fd >= 0) close(log_fd);
+    if (shutdown) {
+        check("TC-7-05 완료 요청 한 줄 ok", strstr(access, " 200 ") != NULL &&
+              strstr(access, " ok\n") != NULL && strstr(access, " aborted\n") == NULL, access);
+    } else {
+        check("TC-7-01 끊긴 요청 한 줄 aborted", strstr(access, " 200 ") != NULL &&
+              strstr(access, " aborted\n") != NULL && strstr(strstr(access, " aborted\n") + 1, " aborted\n") == NULL,
+              access);
+    }
+    close(pg[1]); close(pa[0]);
+}
+
+/* 10초 강제 마감: 소켓에서 실제 성공한 서버 write의 시각을 관측한다. */
+static void test_forced_shutdown_progress(void)
+{
+    int pg[2], pa[2], progress[2], fd, status, i, flags, refused = 0;
+    char ch, buf[2048], log[4096], access[4096];
+    int seen5 = 0, seen8 = 0, writes = 0, total = 0;
+    double exit_elapsed = -1;
+    siginfo_t exit_info = {0};
+    struct sockaddr_un addr = {0};
+    struct timespec gap = {0, 100 * 1000 * 1000}, start;
+    pid_t pid;
+    setup_or_die(pipe(pg) == 0 && pipe(pa) == 0 && pipe(progress) == 0, "forced pipes");
+    output_gate_r = pg[0]; output_ack_w = pa[1]; progress_w = progress[1];
+    output_gate_once = 0; throttle_output = 1;
+    pid = start_server();
+    close(pg[0]); close(pa[1]); close(progress[1]);
+    output_gate_r = output_ack_w = progress_w = -1; throttle_output = 0;
+    flags = fcntl(progress[0], F_GETFL);
+    setup_or_die(flags >= 0 && fcntl(progress[0], F_SETFL, flags | O_NONBLOCK) == 0, "progress nonblock");
+    fd = dial();
+    {
+        int size = 8192;
+        setup_or_die(setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size)) == 0, "client rcvbuf");
+    }
+    write_all(fd, "GET /big.bin HTTP/1.1\r\nHost: x\r\n\r\n");
+    setup_or_die(read(pa[0], &ch, 1) == 1 && ch == 'U', "forced unsent gate");
+    setup_or_die(kill(pid, SIGTERM) == 0, "forced signal");
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
+    for (i = 0; i < 100; i++) {
+        int s = socket(AF_UNIX, SOCK_STREAM, 0);
+        setup_or_die(s >= 0, "forced refuse socket");
+        if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0 && errno == ECONNREFUSED) refused = 1;
+        close(s);
+        if (refused) break;
+        nanosleep(&gap, NULL);
+    }
+    check("TC-7-10 정리 시작 전 미송신 64KB 관문·accept 중단", refused, "정리 미진입");
+    setup_or_die(write(pg[1], "R", 1) == 1, "forced release");
+    for (i = 0; i < 120; i++) {
+        ssize_t n;
+        double elapsed = seconds_since(&start);
+        if (elapsed >= 11.8) break;
+        if (poll(&(struct pollfd){fd, POLLIN, 0}, 1, 0) > 0) {
+            n = read(fd, buf, 1024);
+            if (n > 0) total += (int)n;
+        }
+        while ((n = read(progress[0], buf, sizeof(buf))) > 0) {
+            writes += (int)n;
+            if (elapsed > 5.0) seen5 = 1;
+            if (elapsed > 8.0) seen8 = 1;
+        }
+        setup_or_die(waitid(P_PID, (id_t)pid, &exit_info, WEXITED | WNOWAIT | WNOHANG) == 0, "waitid");
+        if (exit_info.si_pid == pid) {
+            exit_elapsed = seconds_since(&start);
+            break;
+        }
+        nanosleep(&gap, NULL);
+    }
+    status = wait_exit(pid, 2.0, log, sizeof(log));
+    {
+        int a = open(access_path, O_RDONLY);
+        ssize_t n = a >= 0 ? read(a, access, sizeof(access) - 1) : -1;
+        access[n > 0 ? n : 0] = '\0';
+        if (a >= 0) close(a);
+    }
+    printf("  TC-7-10 계측: 종료 %.2fs, 성공 write %d회, 클라이언트 수신 %dB, 5초 뒤 %d / 8초 뒤 %d\n",
+           exit_elapsed, writes, total, seen5, seen8);
+    check("TC-7-10 5초 마감보다 늦게 서버 write 성공 계측", writes > 0 && seen5 && seen8,
+          "5초·8초 뒤 실제 write 진행 증거 없음");
+    {
+        char *aborted = strstr(access, " aborted\n");
+        check("TC-7-10 10초 상한 강제 종료·응답 미완료", exit_elapsed >= 9.7 && exit_elapsed <= 11.0 &&
+              status >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0 && total < 4194304 &&
+              strstr(log, "강제 종료 연결 1개") && aborted != NULL &&
+              strstr(aborted + 1, " aborted\n") == NULL,
+              "종료 시간/로그/응답 불일치");
+    }
+    close(fd); close(pg[1]); close(pa[0]); close(progress[0]);
+}
+
 int main(void)
 {
     alarm(120);
@@ -824,6 +1227,13 @@ int main(void)
     test_sequential_wakeups();
     test_fatal_epoll_wait();
     test_partial_workers();
+    test_shutdown_request_boundary();
+    test_late_signal_before_collect();
+    test_admission_mask(2);
+    test_admission_mask(3);
+    test_unsent_output_gate(0);
+    test_unsent_output_gate(1);
+    test_forced_shutdown_progress();
     remove_root();
 
     if (failures > 0) {

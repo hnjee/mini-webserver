@@ -59,6 +59,13 @@ typedef struct {
     http_request req;         /* 처리 중인 요청 정보 */
     http_connection conn_hdr; /* 응답 Connection 머리(D-51) */
     int close_after;          /* 0 유지, 1 닫기, 2 shutdown 뒤 정리(D-54) */
+    int stopping;             /* 루프가 바쁘지 않은 연결에만 표시(D-69) */
+    int at_boundary;          /* 응답 완료 뒤 다음 요청 시작 전 회수 지점 */
+    char peer[64], request_line[HTTP_REQUEST_TARGET_MAX + 64];
+    int log_status;           /* 0이면 아직 최종 응답 상태 미정 */
+    size_t log_bytes;
+    long long log_started;
+    int log_active;
     int echo;                 /* POST /echo인가 */
     size_t body_buffered;     /* in 안의 본문 바이트(머리 바로 뒤) */
     size_t body_left;         /* 소켓에서 더 읽을 본문 바이트 */
@@ -84,7 +91,7 @@ typedef struct {
 } http_conn;
 
 /* 새 연결(fd는 논블로킹). 요청 사이 대기로 시작하고 마감은 now + 5초다. routes는 NULL이면 프록시 없음. */
-void http_conn_init(http_conn *c, int fd, const char *root, route_table *routes, long long now);
+void http_conn_init(http_conn *c, int fd, const char *root, route_table *routes, const char *peer, long long now);
 
 /*
  * 한 차례를 실행한다(D-56 예산: 소켓 read 1번(백엔드 read 포함), 파일 조각 1번, 백엔드 write 1번,
@@ -102,6 +109,9 @@ int http_conn_expired(const http_conn *c, long long now);
  * 커밋 전 백엔드 대기면 백엔드를 닫고 504 순서로 넘어가 RUNNABLE을 돌려준다(D-67).
  */
 http_conn_step http_conn_expire(http_conn *c);
+
+/* 정지 적용: 요청 사이에는 즉시 닫고, 진행 중이면 그 요청만 마친다. 바쁘지 않을 때만 호출한다. */
+http_conn_step http_conn_stop(http_conn *c);
 
 /* 연결 자원 해제: 열려 있는 파일 fd와 백엔드 소켓을 닫는다. 클라이언트 소켓은 닫지 않는다(루프가 닫는다). */
 void http_conn_release(http_conn *c);

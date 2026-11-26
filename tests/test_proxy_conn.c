@@ -211,7 +211,7 @@ static void sess_open(sess *s, const char *data, size_t len, int shut)
     set_nonblocking(fds[0]);
     set_nonblocking(fds[1]);
     s->client = fds[0];
-    http_conn_init(s->c, fds[1], root, &routes, now_ns());
+    http_conn_init(s->c, fds[1], root, &routes, NULL, now_ns());
     s->step = HTTP_CONN_WANT_READ;
 }
 
@@ -604,7 +604,7 @@ static http_conn *direct_open(const char *req, int *client, long long now)
         setup_or_die(write(fds[0], req, strlen(req)) == (ssize_t)strlen(req), "write");
     }
     peer = -1;
-    http_conn_init(c, fds[1], root, &routes, now);
+    http_conn_init(c, fds[1], root, &routes, NULL, now);
     *client = fds[0];
     return c;
 }

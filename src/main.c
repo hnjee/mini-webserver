@@ -5,6 +5,7 @@
  */
 #define _DEFAULT_SOURCE /* realpath */
 
+#include "access_log.h"
 #include "listener.h"
 #include "options.h"
 #include "route.h"
@@ -17,6 +18,12 @@
 #include <string.h>
 #include <unistd.h>
 
+/* 신호 핸들러는 errno를 포함해 루프의 async-signal-safe 경로에만 위임한다. */
+static void on_stop(int signo)
+{
+    server_loop_request_stop(signo);
+}
+
 int main(int argc, char *argv[])
 {
     static route_table table; /* 프로세스 수명 동안 루프에 빌려준다 */
@@ -24,7 +31,8 @@ int main(int argc, char *argv[])
     options config;
     char error[256];
     options_status status;
-    int listen_fd;
+    int listen_fd, rc;
+    struct sigaction sa;
     char *root;
 
     status = options_parse(argc, argv, &config, error, sizeof(error));
@@ -49,25 +57,39 @@ int main(int argc, char *argv[])
     if (config.config != NULL) {
         if (route_load(config.config, &table, error, sizeof(error)) != 0) {
             fprintf(stderr, "오류: %s\n", error);
+            free(root);
             return EXIT_FAILURE;
         }
         routes = &table;
     }
 
-    /* D-05: 끊긴 연결에 쓰면 프로세스가 죽지 않고 write가 EPIPE로 실패하게 한다. */
+    /* D-05: 끊긴 연결에 쓰면 EPIPE로 그 연결만 닫는다. */
     signal(SIGPIPE, SIG_IGN);
+    memset(&sa, 0, sizeof(sa));
+    sigemptyset(&sa.sa_mask);
+    sa.sa_handler = on_stop;
+    if (sigaction(SIGINT, &sa, NULL) != 0 || sigaction(SIGTERM, &sa, NULL) != 0) {
+        fprintf(stderr, "오류: sigaction 실패: %s\n", strerror(errno));
+        free(root);
+        return EXIT_FAILURE;
+    }
 
     listen_fd = listener_open(config.port, error, sizeof(error));
     if (listen_fd < 0) {
         fprintf(stderr, "오류: %s\n", error);
+        free(root);
         return EXIT_FAILURE;
     }
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    access_log_enable();
     printf("HTTP 서버 시작: 0.0.0.0:%d, 루트 %s, 프록시 규칙 %zu개. Ctrl+C로 종료\n", config.port, root,
            routes != NULL ? routes->count : (size_t)0);
-    fflush(stdout);
 
-    server_loop_run(listen_fd, root, routes, error, sizeof(error)); /* 서버를 끝내는 실패에서만 돌아온다 */
-    fprintf(stderr, "오류: %s\n", error);
-    close(listen_fd);
-    return EXIT_FAILURE;
+    rc = server_loop_run(listen_fd, root, routes, error, sizeof(error));
+    free(root);
+    if (rc != 0) {
+        fprintf(stderr, "오류: %s\n", error);
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
 }

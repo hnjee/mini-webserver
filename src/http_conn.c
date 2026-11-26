@@ -5,9 +5,11 @@
  * 한 차례는 "출력이 남아 있으면 먼저 보내고(flush), 비면 지금 상태의 처리 함수"를 외부 I/O가 필요할 때까지 반복한다.
  */
 #include "http_conn.h"
+#include "access_log.h"
 #include "static_file.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
@@ -44,6 +46,25 @@ typedef struct {
 } turn;
 
 typedef int (*state_fn)(http_conn *c, turn *t, long long now);
+
+static void log_finished(http_conn *c, const char *result)
+{
+    if (c->log_status != 0) {
+        access_log_write(c->peer, c->request_line, c->log_status, c->log_bytes, c->log_started, result);
+    }
+    c->log_active = c->log_status = 0;
+    c->log_bytes = 0;
+}
+
+static void log_status(http_conn *c, int status, long long now)
+{
+    if (!c->log_active) {
+        c->log_active = 1;
+        c->log_started = now;
+        strcpy(c->request_line, "-");
+    }
+    c->log_status = status;
+}
 
 static int finish(http_conn *c, http_conn_result result, int err)
 {
@@ -100,6 +121,7 @@ static int flush(http_conn *c, turn *t, long long now)
             return errno == EAGAIN || errno == EWOULDBLOCK ? wait_for(c, WAIT_WRITE) : finish(c, HTTP_CONN_ERROR, errno);
         }
         c->out_pos += (size_t)n;
+        if (c->log_status) c->log_bytes += (size_t)n;
         t->may_write -= (size_t)n;
         /* 성공한 write는 진행이다. 마지막 write가 곧 "출력을 다 보낸 때"라 다음 대기도 여기서부터 잰다(D-59). */
         c->deadline = now + HTTP_CONN_TIMEOUT_NS;
@@ -153,6 +175,7 @@ static int fill_status(http_conn *c, int status, const http_response_extra *extr
         return finish(c, HTTP_CONN_ERROR, errno);
     }
     filled(c, (size_t)n, now);
+    log_status(c, status, now);
     c->state = ST_RESPONDED;
     return CONTINUE;
 }
@@ -163,10 +186,14 @@ static int start_request(http_conn *c, long long now)
     int keep = http_request_keep_alive(&c->req);
     size_t in_buffer = c->in_len - c->req.head_len;
 
-    c->conn_hdr = !keep ? HTTP_CONNECTION_CLOSE
+    if (!c->log_active) c->log_started = now;
+    c->log_active = 1;
+    c->committed = 0; /* 커밋 여부는 요청마다: 이전 프록시 응답 값이 정지 판정에 남지 않게 한다 */
+    snprintf(c->request_line, sizeof(c->request_line), "%s %s %s", c->req.method, c->req.target, c->req.version);
+    c->conn_hdr = c->stopping || !keep ? HTTP_CONNECTION_CLOSE
                   : c->req.version_minor == 0 ? HTTP_CONNECTION_KEEP_ALIVE
                                               : HTTP_CONNECTION_NONE;
-    c->close_after = keep ? 0 : 1;
+    c->close_after = c->stopping || !keep ? 1 : 0;
     if (in_buffer > c->req.content_length) {
         in_buffer = c->req.content_length;
     }
@@ -204,6 +231,11 @@ static int on_head(http_conn *c, turn *t, long long now)
     t->did_read = 1;
     n = read(c->fd, c->in + c->in_len, sizeof(c->in) - c->in_len);
     if (n > 0) {
+        if (!c->log_active) {
+            c->log_active = 1;
+            c->log_started = now;
+            strcpy(c->request_line, "-");
+        }
         c->in_len += (size_t)n;
         c->deadline = now + HTTP_CONN_TIMEOUT_NS;
         return CONTINUE;
@@ -240,6 +272,7 @@ static int on_body_start(http_conn *c, turn *t, long long now)
         }
         memcpy(c->out + n, c->in + c->req.head_len, c->body_buffered);
         filled(c, (size_t)n + c->body_buffered, now);
+        log_status(c, 200, now);
         c->state = ST_ECHO;
     } else {
         c->state = ST_DISCARD;
@@ -303,6 +336,7 @@ static int respond(http_conn *c, long long now)
         return finish(c, HTTP_CONN_ERROR, errno);
     }
     filled(c, (size_t)n, now);
+    log_status(c, 200, now);
     c->state = ST_FILE;
     return CONTINUE;
 }
@@ -356,6 +390,7 @@ static int on_file(http_conn *c, turn *t, long long now)
 static int on_responded(http_conn *c, turn *t, long long now)
 {
     (void)t;
+    log_finished(c, "ok");
     if (c->close_after == 1) {
         return finish(c, HTTP_CONN_DONE, 0); /* 본문을 다 읽었으므로 정리 없이 닫는다 */
     }
@@ -367,8 +402,12 @@ static int on_responded(http_conn *c, turn *t, long long now)
         c->state = ST_DRAIN;
         return CONTINUE;
     }
+    if (c->stopping) {
+        return finish(c, HTTP_CONN_DONE, 0);
+    }
     c->state = ST_HEAD;
-    return CONTINUE;
+    c->at_boundary = 1;
+    return HTTP_CONN_RUNNABLE; /* 루프 회수·정지 확인 뒤에만 다음 요청 파싱 */
 }
 
 /* 닫기 전 정리: 상대가 닫음·읽기 오류·고정 마감 중 먼저 오는 때까지 읽어 버린다. 마감 뒤에는 새로 읽지 않는다. */
@@ -516,6 +555,7 @@ static int px_commit(http_conn *c, const proxy_response *resp, long long now)
     }
     memcpy(c->out + n, c->be_in + resp->head_len, extra);
     filled(c, (size_t)n + extra, now);
+    log_status(c, resp->status, now);
     c->committed = 1;
     c->uploading = 0;
     c->be_out_pos = c->be_out_len = 0; /* 조기 응답: 미송신 바이트 버림(D-66) */
@@ -666,6 +706,9 @@ static int on_px_skip(http_conn *c, turn *t, long long now)
 {
     ssize_t n;
 
+    if (c->committed) {
+        log_finished(c, "ok"); /* 중계 응답은 이미 다 보냈다(처리 함수는 출력이 빈 뒤에만 불린다). 남은 업로드 버리기와 분리 */
+    }
     if (c->body_left > 0 && c->pending_status == 0 && c->close_after != 0) {
         c->state = ST_RESPONDED; /* 닫기 규칙이면 남은 본문을 버리지 않고 닫는다 */
         return CONTINUE;
@@ -699,9 +742,14 @@ static int on_px_skip(http_conn *c, turn *t, long long now)
 static const state_fn handlers[] = {on_head,   on_body_start, on_echo,      on_discard, on_file,   on_responded,
                                     on_drain,  on_px_connect, on_px_upload, on_px_head, on_px_body, on_px_skip};
 
-void http_conn_init(http_conn *c, int fd, const char *root, route_table *routes, long long now)
+void http_conn_init(http_conn *c, int fd, const char *root, route_table *routes, const char *peer, long long now)
 {
     c->fd = fd;
+    snprintf(c->peer, sizeof(c->peer), "%s", peer != NULL ? peer : "-");
+    strcpy(c->request_line, "-");
+    c->log_status = c->log_active = 0;
+    c->log_bytes = 0;
+    c->log_started = now;
     c->root = root;
     c->routes = routes;
     c->be_fd = -1;
@@ -714,7 +762,7 @@ void http_conn_init(http_conn *c, int fd, const char *root, route_table *routes,
     c->result = HTTP_CONN_DONE;
     c->err = 0;
     c->in_len = 0;
-    c->close_after = 0;
+    c->close_after = c->stopping = c->at_boundary = 0;
     c->body_buffered = c->body_left = 0;
     c->file_fd = -1;
     c->file_left = 0;
@@ -725,6 +773,7 @@ http_conn_step http_conn_run(http_conn *c, int wake, long long now)
 {
     turn t = {0, 0, c->out_len - c->out_pos, 0, wake};
 
+    c->at_boundary = 0;
     for (;;) {
         int r = c->out_pos < c->out_len ? flush(c, &t, now) : handlers[c->state](c, &t, now);
         if (r != CONTINUE) {
@@ -756,8 +805,24 @@ http_conn_step http_conn_expire(http_conn *c)
     }
 }
 
+http_conn_step http_conn_stop(http_conn *c)
+{
+    c->stopping = 1;
+    if (c->state == ST_HEAD && (c->wait == WAIT_IDLE || c->at_boundary)) {
+        return (http_conn_step)finish(c, HTTP_CONN_DONE, 0);
+    }
+    if (!c->committed && c->out_pos == c->out_len) {
+        c->conn_hdr = HTTP_CONNECTION_CLOSE;
+        c->close_after = 1;
+    }
+    return c->wait == WAIT_WRITE ? HTTP_CONN_WANT_WRITE :
+           c->wait == WAIT_BE_CONNECT || c->wait == WAIT_BE_WRITE ? HTTP_CONN_WANT_BACKEND_WRITE :
+           c->wait == WAIT_BE_READ ? HTTP_CONN_WANT_BACKEND_READ : HTTP_CONN_WANT_READ;
+}
+
 void http_conn_release(http_conn *c)
 {
+    if (c->log_status) log_finished(c, "aborted");
     if (c->file_fd >= 0) {
         close(c->file_fd);
         c->file_fd = -1;

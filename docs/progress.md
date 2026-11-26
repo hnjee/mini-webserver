@@ -15,7 +15,8 @@ flowchart LR
     classDef blocked fill:#FCEBEB,stroke:#A32D2D,color:#501313
     class S0,S1,S2,S3 done
     class S4,S5,S6 done
-    class S7,S8 todo
+    class S7 done
+    class S8 todo
 ```
 
 | Step | 내용 | 요구사항 | 일정 | 상태 | 문서 |
@@ -27,14 +28,15 @@ flowchart LR
 | 4 | POST 본문 + keep-alive | R-05, Q-03 | 11/24 (화) | ✅ 완료 | [Step 4](./steps/step-4-post-keepalive/README.md) · [결정](./steps/step-4-post-keepalive/decision.md) |
 | 5 | 동시성 | R-06, Q-02 | 11/24 (화) | ✅ 완료 | [Step 5](./steps/step-5-concurrency/README.md) · [결정](./steps/step-5-concurrency/decision.md) |
 | 6 | 리버스 프록시 (동적 요청 처리 포함) | R-07, R-08, Q-03 | 11/25 (수) 오전 | ✅ 완료 | [Step 6](./steps/step-6-reverse-proxy/README.md) · [결정](./steps/step-6-reverse-proxy/decision.md) |
-| 7 | 안정성 | R-09, Q-03 | 11/25 (수) 오후 | ⬜ 시작 전 | [Step 7](./steps/step-7-robustness/README.md) · [결정](./steps/step-7-robustness/decision.md) |
+| 7 | 안정성 | R-09, Q-03 | 11/25 (수) 오후 | ✅ 완료 | [Step 7](./steps/step-7-robustness/README.md) · [결정](./steps/step-7-robustness/decision.md) |
 | 8 | 테스트와 최종 선택 | Q-01, Q-02 | 11/25 (수) 오후 | ⬜ 시작 전 | [Step 8](./steps/step-8-final/README.md) · [결정](./steps/step-8-final/decision.md) |
 
 ## 지금
 
 - 완료: Step 6 리버스 프록시. TC-6-01~14 독립 검증 통과, 설정 파서 넘침(F1)은 수정 뒤 재확인 통과. [검증 요약](./verification.md).
 - 후속 확장: [epoll + 작업 큐 + 워커 풀](./extensions/worker-pool/README.md) 구현·독립 코드 검증 통과. 세부 설계 선택은 사용자 채택 전 `임시`이며 Step 5·6 완료 기록과 별개다.
-- 다음: Step 7 안정성. 시작 실패 경로의 `realpath` 누수(4097바이트)를 TC-7-02에서 함께 정리한다.
+- 완료: Step 7 TC-7-01~17·기존 기능 회귀, 브라우저 표시, DESIGN.md 완료 기준 Ctrl+C·ASan·valgrind 독립 확인. D-68~D-72 채택. [검증 요약](./verification.md).
+- 다음: Step 8 테스트와 최종 선택 (아직 시작 전).
 - 막힌 것: 없음.
 
 ## 기준선

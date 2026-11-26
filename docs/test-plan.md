@@ -38,7 +38,7 @@
 | [Step 4](./steps/step-4-post-keepalive/README.md) | 36 | 기능, 단위 | 36 | 0 |
 | [Step 5](./steps/step-5-concurrency/README.md) | 11 | 기능, 부하, 단위, 회귀 | 11 | 0 |
 | [Step 6](./steps/step-6-reverse-proxy/README.md) | 14 | 기능, 단위, 회귀 | 14 (독립 검증) | 0 |
-| [Step 7](./steps/step-7-robustness/README.md) | 2 | 기능, 메모리 | 0 | 0 |
+| [Step 7](./steps/step-7-robustness/README.md) | 17 | 기능, 단위, 회귀, 메모리 | 17 | 0 |
 | [Step 8](./steps/step-8-final/README.md) | 2 | 부하, 회귀 | 0 | 0 |
 
 - Step 5 TC-5-08은 이전 기능 증거와 대체 관계를 대조하고, 빠졌던 브라우저 TC-3-01을 재실행해 완료했다. Step 4가 대체한 TC-3-18의 옛 기대값은 제외한다.

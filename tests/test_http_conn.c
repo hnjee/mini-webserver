@@ -155,7 +155,7 @@ static http_conn_result drive(int fd, const char *root_dir)
 
     setup_or_die(c != NULL, "malloc");
     set_nonblocking(fd);
-    http_conn_init(c, fd, root_dir, NULL, now_ns());
+    http_conn_init(c, fd, root_dir, NULL, NULL, now_ns());
     for (;;) {
         struct pollfd pfd;
         long long left = c->deadline - now_ns();
@@ -1007,7 +1007,7 @@ static direct direct_open(long long now)
     set_nonblocking(d.server);
     d.c = malloc(sizeof(*d.c));
     setup_or_die(d.c != NULL, "malloc");
-    http_conn_init(d.c, d.server, root, NULL, now);
+    http_conn_init(d.c, d.server, root, NULL, NULL, now);
     return d;
 }
 
@@ -1530,12 +1530,142 @@ static void run_slow_tests(void)
     }
 }
 
+/* TC-7-12: 버퍼에 둘째 요청이 있어도 첫 응답 직후 루프가 회수한다. */
+static void test_stop_at_request_boundary(void)
+{
+    const char requests[] = "GET / HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n";
+    int fds[2];
+    http_conn *c = malloc(sizeof(*c));
+    http_conn_step step;
+    char reply[4096];
+    size_t n;
+    int i;
+
+    setup_or_die(c != NULL && socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "stop socketpair");
+    set_nonblocking(fds[1]);
+    http_conn_init(c, fds[1], root, NULL, NULL, now_ns());
+    write_all(fds[0], requests, sizeof(requests) - 1);
+    for (i = 0; i < 20; i++) {
+        step = http_conn_run(c, HTTP_CONN_WAKE_CLIENT, now_ns());
+        if (step == HTTP_CONN_RUNNABLE && c->out_len == 0 && c->in_len > 0) {
+            break;
+        }
+        setup_or_die(step == HTTP_CONN_RUNNABLE, "첫 응답 차례");
+    }
+    check("TC-7-12 첫 응답 뒤 요청 경계 반환", i < 20 && c->in_len > 0, "둘째 요청을 이미 처리했다");
+    check("TC-7-12 정지 시 버퍼 속 다음 요청 폐기", http_conn_stop(c) == HTTP_CONN_FINISHED &&
+          c->result == HTTP_CONN_DONE, "정지가 다음 요청을 허용했다");
+    http_conn_release(c);
+    close(fds[1]);
+    n = read(fds[0], reply, sizeof(reply) - 1);
+    setup_or_die(n > 0, "첫 응답 읽기");
+    reply[n] = '\0';
+    check("TC-7-12 첫 응답만 송신", strstr(reply, "HTTP/1.1 200") != NULL &&
+          strstr(reply + 1, "HTTP/1.1 200") == NULL, "두 응답이 왔다");
+    close(fds[0]);
+    free(c);
+}
+
+/* TC-7-12: 요청 머리 수신 중 정지는 요청을 끝내되 응답은 닫는 머리로 만든다. */
+static void test_stop_mid_head(void)
+{
+    int fds[2], i;
+    http_conn *c = malloc(sizeof(*c));
+    http_conn_step step;
+    char reply[4096];
+    size_t n;
+    setup_or_die(c != NULL && socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "stop mid-head socketpair");
+    set_nonblocking(fds[1]);
+    http_conn_init(c, fds[1], root, NULL, NULL, now_ns());
+    write_all(fds[0], "GET / HTTP/1.1\r\n", 16);
+    step = http_conn_run(c, HTTP_CONN_WAKE_CLIENT, now_ns());
+    check("TC-7-12 머리 중 정지 준비", step == HTTP_CONN_WANT_READ && c->in_len > 0, "부분 머리 대기 아님");
+    check("TC-7-12 머리 중 정지는 요청을 즉시 닫지 않음", http_conn_stop(c) != HTTP_CONN_FINISHED,
+          "요청 미완료 전에 닫힘");
+    write_all(fds[0], "Host: x\r\n\r\n", 11);
+    for (i = 0; i < 20; i++) {
+        step = http_conn_run(c, HTTP_CONN_WAKE_CLIENT, now_ns());
+        if (step == HTTP_CONN_FINISHED) break;
+        setup_or_die(step == HTTP_CONN_RUNNABLE, "stop mid-head runnable");
+    }
+    check("TC-7-12 머리 완료 뒤 닫는 응답", i < 20 && c->result == HTTP_CONN_DONE,
+          "정지 후 응답이 완료되지 않음");
+    http_conn_release(c); close(fds[1]);
+    n = read(fds[0], reply, sizeof(reply) - 1); setup_or_die(n > 0, "stop mid-head read");
+    reply[n] = '\0';
+    check("TC-7-12 새 응답 머리는 Connection: close", strstr(reply, "Connection: close\r\n") != NULL, reply);
+    close(fds[0]); free(c);
+}
+
+/* TC-7-12: 본문 대기(머리 미작성)와 작성된 응답은 정지 뒤에도 각각 닫는 응답·완송한다. */
+static void test_stop_body_and_committed(void)
+{
+    int fds[2], i;
+    http_conn *c = malloc(sizeof(*c));
+    http_conn_step step;
+    char reply[4096];
+    size_t n;
+    setup_or_die(c && socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "stop body socketpair");
+    set_nonblocking(fds[1]);
+    http_conn_init(c, fds[1], root, NULL, NULL, now_ns());
+    {
+        const char req[] = "POST /missing HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\n";
+        write_all(fds[0], req, sizeof(req) - 1);
+    }
+    step = http_conn_run(c, HTTP_CONN_WAKE_CLIENT, now_ns());
+    check("TC-7-12 본문 대기 중 머리 아직 미작성", step == HTTP_CONN_WANT_READ && c->out_len == 0,
+          "본문 대기 아님");
+    check("TC-7-12 본문 중 정지는 요청을 완료시킴", http_conn_stop(c) != HTTP_CONN_FINISHED,
+          "본문을 받기 전에 닫힘");
+    write_all(fds[0], "abc", 3);
+    for (i = 0; i < 20; i++) {
+        step = http_conn_run(c, HTTP_CONN_WAKE_CLIENT, now_ns());
+        if (step == HTTP_CONN_FINISHED) break;
+        setup_or_die(step == HTTP_CONN_RUNNABLE, "stop body runnable");
+    }
+    check("TC-7-12 머리 미작성 응답 Connection: close", i < 20 && c->result == HTTP_CONN_DONE,
+          "응답이 완료되지 않음");
+    http_conn_release(c); close(fds[1]);
+    n = read(fds[0], reply, sizeof(reply) - 1); setup_or_die(n > 0, "stop body response");
+    reply[n] = '\0';
+    check("TC-7-12 본문 완료 뒤 405 close", strstr(reply, "HTTP/1.1 405") &&
+          strstr(reply, "Connection: close\r\n"), reply);
+    close(fds[0]); free(c);
+
+    c = malloc(sizeof(*c));
+    setup_or_die(c && socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "stop committed socketpair");
+    set_nonblocking(fds[1]);
+    http_conn_init(c, fds[1], root, NULL, NULL, now_ns());
+    {
+        const char req[] = "GET / HTTP/1.1\r\nHost: x\r\n\r\n";
+        write_all(fds[0], req, sizeof(req) - 1);
+    }
+    step = http_conn_run(c, HTTP_CONN_WAKE_CLIENT, now_ns());
+    check("TC-7-12 응답 머리를 이미 채움", step == HTTP_CONN_RUNNABLE && c->out_len > 0,
+          "응답 머리 미작성");
+    http_conn_stop(c);
+    for (i = 0; i < 20; i++) {
+        step = http_conn_run(c, HTTP_CONN_WAKE_INTERNAL, now_ns());
+        if (step == HTTP_CONN_FINISHED) break;
+        setup_or_die(step == HTTP_CONN_RUNNABLE, "stop committed runnable");
+    }
+    http_conn_release(c); close(fds[1]);
+    n = read(fds[0], reply, sizeof(reply) - 1); setup_or_die(n > 0, "stop committed response");
+    reply[n] = '\0';
+    check("TC-7-12 작성된 응답은 끝까지 보내고 닫음", i < 20 && c->result == HTTP_CONN_DONE &&
+          strstr(reply, index_body) != NULL, reply);
+    close(fds[0]); free(c);
+}
+
 int main(void)
 {
     alarm(10); /* 서버가 멈추면 끝없이 기다리지 않게 한다 */
     signal(SIGPIPE, SIG_IGN); /* D-05: 서버와 같은 조건 */
     printf("test_http_conn (TC-2-07, TC-3-08, TC-3-10, TC-4-10·19·20·22·24~36, TC-5-09·10)\n");
     build_root();
+    test_stop_at_request_boundary();
+    test_stop_mid_head();
+    test_stop_body_and_committed();
     test_split_request();
     test_close_mid_head();
     test_status_mapping();

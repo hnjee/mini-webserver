@@ -16,7 +16,7 @@
 | [Step 4](./steps/step-4-post-keepalive/README.md) | ✅ 통과 | 2026-11-25 | 이전 독립 재확인: TC-4-01~36 통과, `make test` 675 ok줄·실패 0, 결함 주입 7개 검출. |
 | [Step 5](./steps/step-5-concurrency/README.md) | ✅ 통과 | 2026-11-25 | Ubuntu 독립 ASan 빌드·단위 ok 742줄/실패 0; `nc` 중 `curl` 200; `ab -n 2000 -c 50` 실패 0·5,191.97 req/s. TC-5-08은 이전 22개 기능 ID 재사용·TC-4-17 대체·TC-3-01 Chrome 신규 실행으로 현행 기능 24개 ID 확인. |
 | [Step 6](./steps/step-6-reverse-proxy/README.md) | ✅ 통과 | 2026-11-25 | TC-6-01~14 독립 검증(Mavuika). 실제 네트워크로 교대·502·504·조기 413·연결 유지·정적 회귀 확인. 설정 파서 넘침(F1) 수정 뒤 재확인 통과. 전체 `make -B test` 918 ok는 구현자 실행을 해시 일치로 재사용. |
-| [Step 7](./steps/step-7-robustness/README.md) | ⬜ | - | - |
+| [Step 7](./steps/step-7-robustness/README.md) | ✅ 통과 | 2026-11-26 | TC-7-01~17 통과(초기 결함 F1~F3 수정·재검토 포함). 기존 기능 54건·보완 37건을 O2/ASan/TSan에서 독립 실행, TC-3-01 브라우저 확인. DESIGN 완료 기준은 PTY Ctrl+C로 독립 실행: 중단 curl 뒤 서버 생존, 서버 SIGINT 종료 0·ASan 오류 없음·valgrind 누수/오류 0. [상세 기록](./steps/step-7-robustness/README.md#5-검증-기록). |
 | [Step 8](./steps/step-8-final/README.md) | ⬜ | - | - |
 
 ## Step 6 뒤 워커 풀 확장
@@ -35,5 +35,5 @@
 | Step 1~5 통과 (화요일) | | |
 | 부하 `ab` (Requests/sec, 실패 수) | 독립 ASan: 5,191.97 req/s, 실패 0; 자체 -O2: 5,887.24 req/s, 실패 0 (최종 실행) | [Step 5](./steps/step-5-concurrency/README.md) |
 | 부하 `wrk` | | [Step 8](./steps/step-8-final/README.md) |
-| Step 6~7 통과 (수요일) | | |
-| 메모리 검사 | | [Step 7](./steps/step-7-robustness/README.md) |
+| Step 6~7 통과 (수요일 계획) | Step 6: 11/25, Step 7: 11/26 | [Step별 결과](#step별-결과) |
+| 메모리 검사 | Step 7 SIGINT 종료: ASan 오류 보고 없음·valgrind 0 bytes / 오류 0 (Linux 비root) | [Step 7](./steps/step-7-robustness/README.md) |

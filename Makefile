@@ -19,9 +19,9 @@ TSAN_TARGET  = webserver-tsan
 TSAN_TESTS   = tests/test_route-tsan tests/test_server_loop-tsan
 SRC         = src/main.c src/options.c src/listener.c src/server_loop.c src/http_conn.c src/http_parser.c \
               src/http_response.c src/io.c src/static_file.c src/mime.c \
-              src/route.c src/proxy.c
+              src/route.c src/proxy.c src/access_log.c
 HDR         = src/options.h src/listener.h src/server_loop.h src/http_conn.h src/http_parser.h src/http_response.h \
-              src/io.h src/static_file.h src/mime.h src/route.h src/proxy.h
+              src/io.h src/static_file.h src/mime.h src/route.h src/proxy.h src/access_log.h
 TEST_TARGETS = tests/test_options tests/test_echo tests/test_http_parser tests/test_http_response tests/test_http_conn \
                tests/test_mime tests/test_static_file tests/test_server_loop tests/test_route tests/test_proxy tests/test_proxy_conn
 EXPERIMENT  = experiments/bind_no_reuse
@@ -61,7 +61,9 @@ tests/test_route-tsan: tests/test_route.c $(ROUTE_SRC) src/route.h $(BUILD_STAMP
 
 tests/test_server_loop-tsan: tests/test_server_loop.c src/server_loop.c src/server_loop.h $(HTTP_CONN_SRC) $(HTTP_CONN_HDR) $(BUILD_STAMP)
 	$(CC) $(CSTD) $(WARN) $(TSAN_CFLAGS) -o $@ tests/test_server_loop.c src/server_loop.c $(HTTP_CONN_SRC) $(TSAN_LDFLAGS) -pthread \
-		-Wl,--wrap=accept4 -Wl,--wrap=epoll_wait -Wl,--wrap=pthread_create
+		-Wl,--wrap=accept4 -Wl,--wrap=epoll_wait -Wl,--wrap=pthread_create -Wl,--wrap=write \
+		-Wl,--wrap=read -Wl,--wrap=eventfd -Wl,--wrap=http_conn_run \
+		-Wl,--wrap=pthread_sigmask -Wl,--wrap=pthread_cond_signal
 
 # 단위 테스트도 ASan으로 빌드해 실행한다.
 test: $(TEST_TARGETS)
@@ -90,9 +92,9 @@ tests/test_http_response: tests/test_http_response.c src/http_response.c src/htt
 	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_http_response.c src/http_response.c src/io.c $(DEBUG_LDFLAGS)
 
 HTTP_CONN_SRC = src/http_conn.c src/http_parser.c src/http_response.c src/io.c src/static_file.c src/mime.c \
-                src/route.c src/proxy.c
+                src/route.c src/proxy.c src/access_log.c
 HTTP_CONN_HDR = src/http_conn.h src/http_parser.h src/http_response.h src/io.h src/static_file.h src/mime.h \
-                src/route.h src/proxy.h
+                src/route.h src/proxy.h src/access_log.h
 tests/test_http_conn: tests/test_http_conn.c $(HTTP_CONN_SRC) $(HTTP_CONN_HDR) $(BUILD_STAMP)
 	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_http_conn.c $(HTTP_CONN_SRC) $(DEBUG_LDFLAGS)
 
@@ -107,7 +109,9 @@ tests/test_static_file: tests/test_static_file.c $(STATIC_FILE_SRC) src/static_f
 # 워커 확장: epoll_wait 관문·실패와 pthread_create 실패도 같은 방식으로 주입한다.
 tests/test_server_loop: tests/test_server_loop.c src/server_loop.c src/server_loop.h $(HTTP_CONN_SRC) $(HTTP_CONN_HDR) $(BUILD_STAMP)
 	$(CC) $(CSTD) $(WARN) $(DEBUG_CFLAGS) -o $@ tests/test_server_loop.c src/server_loop.c $(HTTP_CONN_SRC) $(DEBUG_LDFLAGS) -pthread \
-		-Wl,--wrap=accept4 -Wl,--wrap=epoll_wait -Wl,--wrap=pthread_create
+		-Wl,--wrap=accept4 -Wl,--wrap=epoll_wait -Wl,--wrap=pthread_create -Wl,--wrap=write \
+		-Wl,--wrap=read -Wl,--wrap=eventfd -Wl,--wrap=http_conn_run \
+		-Wl,--wrap=pthread_sigmask -Wl,--wrap=pthread_cond_signal
 
 ROUTE_SRC = src/route.c
 tests/test_route: tests/test_route.c $(ROUTE_SRC) src/route.h $(BUILD_STAMP)

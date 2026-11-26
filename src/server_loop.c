@@ -12,9 +12,11 @@
 #include "http_conn.h"
 
 #include <assert.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -39,6 +41,25 @@ typedef struct {
 } tag;
 
 static tag evfd_tag; /* owner가 NULL인 표: 완료 통지 eventfd */
+static volatile sig_atomic_t stop_signal;
+static volatile sig_atomic_t published_evfd = -1;
+
+/* 핸들러와 같은 스레드에서만 eventfd를 공개·해제한다. write는 async-signal-safe다. */
+void server_loop_request_stop(int signo)
+{
+    int saved = errno;
+    int fd = published_evfd;
+    uint64_t one = 1;
+    if (!stop_signal) {
+        stop_signal = signo;
+    }
+    if (fd >= 0) {
+        ssize_t ignored = write(fd, &one, sizeof(one));
+        (void)ignored;
+    }
+    errno = saved;
+}
+
 
 /* 실행 상태(큐 잠금 안에서만 읽고 바꾼다). 등록 대기·끝은 루프 필드(busy·finished)로 나타낸다. */
 enum { RUN_IDLE, RUN_QUEUED, RUN_RUNNING, RUN_DONE };
@@ -89,6 +110,9 @@ typedef struct {
     int lock_ready, cond_ready;
     pthread_t workers[LOOP_WORKERS];
     int nworkers; /* 만든 워커 수(join 대상) */
+    int stopping, forced;
+    long long shutdown_deadline;
+    unsigned forced_count;
 } loop;
 
 static long long now_ns(void)
@@ -280,9 +304,42 @@ static int unregister(loop *l, conn *c)
     return 0;
 }
 
-/* 작업 큐에 넣는다. 등록이 없는(바쁘지 않은) 연결만 넣는다. */
+static void begin_shutdown(loop *l);
+
+/* 루프 스레드의 신호 마스크 변경. 인자가 고정이라 실패는 계약상 없다: 순서 보장이 깨지므로 바로 멈춘다. */
+static void set_stop_mask(int how, const sigset_t *set, sigset_t *old)
+{
+    int rc = pthread_sigmask(how, set, old);
+    if (rc != 0) {
+        fprintf(stderr, "신호 마스크 변경 실패로 중단: %s\n", strerror(rc));
+        abort();
+    }
+}
+
+/*
+ * 작업 큐에 넣는다(admission). 등록이 없는(바쁘지 않은) 연결만 넣는다.
+ * 선후 기준(D-69 임시): 두 신호를 막고 최신 정지 표시를 본 뒤 큐 삽입까지 마치고 원래 마스크로 되돌린다.
+ * 막기 전에 처리된 신호면 정리를 먼저 시작해 이 연결에도 정지를 적용한다(요청 사이면 넣지 않고 끝,
+ * 이미 시작한 요청이면 그 차례를 넣는다). 막은 동안 온 신호는 보류됐다가 삽입 뒤 복원에서 전달된다.
+ */
 static void submit(loop *l, conn *c, int wake)
 {
+    sigset_t stops, old;
+
+    sigemptyset(&stops);
+    sigaddset(&stops, SIGINT);
+    sigaddset(&stops, SIGTERM);
+    for (;;) {
+        set_stop_mask(SIG_BLOCK, &stops, &old);
+        if (!stop_signal || l->stopping) {
+            break;
+        }
+        set_stop_mask(SIG_SETMASK, &old, NULL);
+        begin_shutdown(l);
+        if (c->finished) {
+            return;
+        }
+    }
     assert(!c->finished && !c->busy && c->client_events == 0 && c->backend_events == 0);
     c->busy = 1;
     c->wake = wake;
@@ -298,6 +355,7 @@ static void submit(loop *l, conn *c, int wake)
     l->p.work_tail = c;
     pthread_cond_signal(&l->p.cond);
     pthread_mutex_unlock(&l->p.lock);
+    set_stop_mask(SIG_SETMASK, &old, NULL); /* 보류 신호는 삽입 뒤 여기서 전달된다 */
 }
 
 /* 보존 차례 중 다음 것을 넣는다. 백엔드 차례는 넣기 직전에 세대를 다시 비교해 다르면 버린다. 넣었으면 1. */
@@ -326,10 +384,29 @@ static void settle(loop *l, conn *c)
 }
 
 /* 완료 큐에서 꺼낸 연결: FINISHED면 끝, 보존 차례가 남았으면 다음 차례, 아니면 마지막 결과대로. */
+/* 새 요청을 넣거나 받기 직전마다 최신 신호를 반영한다: 회차 맨 앞 확인 뒤 온 신호도 admission보다 먼저 본다. */
+static void observe_stop(loop *l)
+{
+    if (stop_signal && !l->stopping) {
+        begin_shutdown(l);
+    }
+}
+
 static void collect(loop *l, conn *c)
 {
     c->busy = 0;
-    if (c->step == HTTP_CONN_FINISHED) {
+    observe_stop(l); /* 정리 시작이 이 연결에도 정지를 적용했을 수 있다 */
+    if (c->finished) {
+        return;
+    }
+    if (l->forced) {
+        c->http.result = HTTP_CONN_ERROR;
+        c->http.err = ECANCELED;
+        l->forced_count++;
+        mark_finished(l, c);
+    } else if (c->step == HTTP_CONN_FINISHED) {
+        mark_finished(l, c);
+    } else if (l->stopping && http_conn_stop(&c->http) == HTTP_CONN_FINISHED) {
         mark_finished(l, c);
     } else if (!submit_next_cause(l, c)) {
         settle(l, c);
@@ -356,16 +433,24 @@ static void add_cause(loop *l, conn *c, int wake, int backend, unsigned gen)
 }
 
 /* 새 연결 준비. 실패하면 만든 자원까지 회수하고 그 소켓만 닫는다. */
-static void add_conn(loop *l, int fd)
+static void add_conn(loop *l, int fd, const struct sockaddr_storage *addr)
 {
     conn *c = malloc(sizeof(*c));
     struct epoll_event ev;
+    char peer[64] = "-";
+
+    if (addr->ss_family == AF_INET) {
+        const struct sockaddr_in *in = (const struct sockaddr_in *)addr;
+        char ip[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &in->sin_addr, ip, sizeof(ip)))
+            snprintf(peer, sizeof(peer), "%s:%u", ip, (unsigned)ntohs(in->sin_port));
+    }
 
     if (c == NULL) {
         close(fd);
         return;
     }
-    http_conn_init(&c->http, fd, l->root, l->routes, now_ns());
+    http_conn_init(&c->http, fd, l->root, l->routes, peer, now_ns());
     c->client_tag.owner = c->backend_tag.owner = c;
     c->client_tag.backend = 0;
     c->backend_tag.backend = 1;
@@ -397,7 +482,9 @@ static int accept_some(loop *l)
     int i;
 
     for (i = 0; i < LOOP_ACCEPT_MAX; i++) {
-        int fd = accept4(l->listen_fd, NULL, NULL, SOCK_NONBLOCK);
+        struct sockaddr_storage addr;
+        socklen_t len = sizeof(addr);
+        int fd = accept4(l->listen_fd, (struct sockaddr *)&addr, &len, SOCK_NONBLOCK);
         if (fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 return 0;
@@ -407,7 +494,7 @@ static int accept_some(loop *l)
             }
             return -1;
         }
-        add_conn(l, fd);
+        add_conn(l, fd, &addr);
     }
     return 0;
 }
@@ -476,6 +563,39 @@ static int check_deadlines(loop *l)
     return earliest > INT_MAX ? INT_MAX : (int)earliest;
 }
 
+/* 종료 표시를 루프에서 적용한다. 워커 실행 중인 연결은 완료 회수 뒤에만 만진다. */
+static void begin_shutdown(loop *l)
+{
+    conn *c;
+    int count = 0;
+    l->stopping = 1;
+    l->shutdown_deadline = now_ns() + 10000000000LL;
+    close(l->listen_fd);
+    l->listen_fd = -1;
+    for (c = l->all; c != NULL; c = c->next) {
+        count++;
+        if (!c->busy && !c->finished && http_conn_stop(&c->http) == HTTP_CONN_FINISHED) {
+            mark_finished(l, c);
+        }
+    }
+    printf("종료 신호 SIG%s: 새 연결 중단, 연결 %d개 마무리 (최대 10초)\n",
+           stop_signal == SIGINT ? "INT" : "TERM", count);
+}
+
+static void force_shutdown(loop *l)
+{
+    conn *c;
+    l->forced = 1;
+    for (c = l->all; c != NULL; c = c->next) {
+        if (!c->busy && !c->finished) {
+            c->http.result = HTTP_CONN_ERROR;
+            c->http.err = ECANCELED;
+            l->forced_count++;
+            mark_finished(l, c);
+        }
+    }
+}
+
 /* 끝난 연결 정리: 결과 기록(ERROR만 로그) → 파일 fd·백엔드 소켓 → 소켓 close(epoll 등록도 지워진다) → 해제. */
 static void reap(loop *l)
 {
@@ -501,18 +621,20 @@ static void reap(loop *l)
 }
 
 /* 서버를 끝낼 때: 워커를 멈춘 뒤(join) 남은 연결을 닫고 해제하고, eventfd·잠금·epoll을 정리한다. */
-static int fail(loop *l, const char *step, char *error, size_t error_size)
+static void cleanup(loop *l)
 {
-    int saved = errno;
-
-    snprintf(error, error_size, "%s 실패: %s", step, strerror(saved));
     stop_workers(l);
+    published_evfd = -1;
     while (l->all != NULL) {
         conn *c = l->all;
         l->all = c->next;
         http_conn_release(&c->http);
         close(c->http.fd);
         free(c);
+    }
+    if (l->listen_fd >= 0) {
+        close(l->listen_fd);
+        l->listen_fd = -1;
     }
     if (l->p.evfd >= 0) {
         close(l->p.evfd);
@@ -526,6 +648,13 @@ static int fail(loop *l, const char *step, char *error, size_t error_size)
     if (l->epfd >= 0) {
         close(l->epfd);
     }
+}
+
+static int fail(loop *l, const char *step, char *error, size_t error_size)
+{
+    int saved = errno;
+    snprintf(error, error_size, "%s 실패: %s", step, strerror(saved));
+    cleanup(l);
     errno = saved;
     return -1;
 }
@@ -534,6 +663,7 @@ static int fail(loop *l, const char *step, char *error, size_t error_size)
 static int start_pool(loop *l, const char **step)
 {
     struct epoll_event ev;
+    sigset_t blocked, old;
     int rc, i;
 
     *step = "eventfd";
@@ -558,14 +688,28 @@ static int start_pool(loop *l, const char **step)
         return -1;
     }
     l->cond_ready = 1;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGINT);
+    sigaddset(&blocked, SIGTERM);
+    *step = "워커 신호 마스크 설정";
+    if ((rc = pthread_sigmask(SIG_BLOCK, &blocked, &old)) != 0) {
+        errno = rc;
+        return -1;
+    }
     *step = "워커 스레드 만들기";
     for (i = 0; i < LOOP_WORKERS; i++) {
         if ((rc = pthread_create(&l->workers[i], NULL, worker_main, &l->p)) != 0) {
+            (void)pthread_sigmask(SIG_SETMASK, &old, NULL);
             errno = rc;
             return -1; /* 만든 워커는 fail이 멈추고 join한다 */
         }
         l->nworkers++;
     }
+    if ((rc = pthread_sigmask(SIG_SETMASK, &old, NULL)) != 0) {
+        errno = rc;
+        return -1;
+    }
+    published_evfd = l->p.evfd;
     return 0;
 }
 
@@ -601,13 +745,40 @@ int server_loop_run(int listen_fd, const char *root, route_table *routes, char *
     for (;;) {
         int n, i, woke = 0;
         conn *c;
+        long long remaining;
 
+        if (stop_signal && !l.stopping) {
+            begin_shutdown(&l);
+        }
+        if (l.stopping && !l.forced && now_ns() >= l.shutdown_deadline) {
+            force_shutdown(&l);
+        }
+        reap(&l);
+        if (l.stopping && l.all == NULL) {
+            if (l.forced_count != 0) {
+                fprintf(stderr, "강제 종료 연결 %u개\n", l.forced_count);
+            }
+            cleanup(&l);
+            puts("서버 종료");
+            return 0;
+        }
+        if (l.stopping && !l.forced) {
+            remaining = (l.shutdown_deadline - now_ns() + 999999) / 1000000;
+            if (remaining < 0) remaining = 0;
+            if (timeout < 0 || timeout > remaining) timeout = (int)remaining;
+        }
         n = epoll_wait(l.epfd, events, LOOP_MAX_EVENTS, timeout);
         if (n < 0) {
             if (errno != EINTR) {
                 return fail(&l, "epoll_wait", error, error_size);
             }
             n = 0;
+        }
+        if (stop_signal && !l.stopping) {
+            begin_shutdown(&l); /* 잠든 동안 온 신호: stale 듣는 소켓 알림을 처리하지 않는다 */
+        }
+        if (l.stopping && !l.forced && now_ns() >= l.shutdown_deadline) {
+            force_shutdown(&l);
         }
         for (i = 0; i < n; i++) { /* 아무것도 넣기 전에 백엔드 알림의 세대를 복사한다 */
             tag *t = events[i].data.ptr;
@@ -617,7 +788,8 @@ int server_loop_run(int listen_fd, const char *root, route_table *routes, char *
         for (i = 0; i < n; i++) { /* 연결별로 알림마다 차례를 배치 순서대로 보존한다. HUP·ERR도 깨우는 정보다(D-57) */
             tag *t = events[i].data.ptr;
             if (t == NULL) {
-                if (accept_some(&l) != 0) {
+                observe_stop(&l);
+                if (!l.stopping && accept_some(&l) != 0) {
                     return fail(&l, "accept", error, error_size);
                 }
                 continue;
@@ -626,6 +798,7 @@ int server_loop_run(int listen_fd, const char *root, route_table *routes, char *
                 woke = 1;
                 continue;
             }
+            if (l.forced) continue;
             c = t->owner;
             assert(!c->busy); /* 바쁜 연결은 등록이 없다 */
             if (c->finished) {
@@ -643,6 +816,10 @@ int server_loop_run(int listen_fd, const char *root, route_table *routes, char *
         }
         for (c = l.touch_head; c != NULL; c = c->touch_next) { /* 유효 등록을 지우고 첫 차례를 넣는다 */
             c->next_cause = 0;
+            observe_stop(&l); /* 정리 시작이 요청 사이 연결을 이미 끝냈으면 넣지 않는다 */
+            if (c->finished) {
+                continue;
+            }
             if (unregister(&l, c) != 0) {
                 conn_error(&l, c);
             } else if (!submit_next_cause(&l, c)) {
@@ -653,7 +830,7 @@ int server_loop_run(int listen_fd, const char *root, route_table *routes, char *
             return fail(&l, "eventfd 읽기", error, error_size);
         }
         collect_done(&l); /* eventfd 결과와 관계없이 매 회차 비운다 */
-        timeout = check_deadlines(&l); /* 방금 다시 등록한 연결도 확인한다(D-59) */
+        timeout = l.forced ? -1 : check_deadlines(&l); /* 강제 이후에는 새 작업을 넣지 않는다 */
         reap(&l);
     }
 }
