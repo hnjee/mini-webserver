@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 1512" width="880" height="1512" font-family="'Noto Sans KR','Noto Sans CJK KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif" xmlns:c2pa="http://c2pa.org/manifest">
+<defs>
+<marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="#222"/></marker>
+</defs>
+<rect width="880" height="1512" fill="#ffffff"/>
+<text x="440" y="52" text-anchor="middle" font-size="36" font-weight="800" fill="#111">싱글 스레드 웹 서버의 문제와 해결</text>
+<rect x="120" y="66" width="640" height="6" rx="3" fill="#a5c8ff"/>
+
+<!-- 문제 A -->
+<rect x="14" y="92" width="852" height="424" rx="18" fill="#fff" stroke="#1c6cf2" stroke-width="2.5"/>
+<rect x="28" y="106" width="120" height="46" rx="10" fill="#1c6cf2"/>
+<text x="88" y="138" text-anchor="middle" font-size="24" font-weight="800" fill="#fff">문제 A</text>
+<rect x="162" y="106" width="690" height="46" rx="10" fill="#dce9ff"/>
+<text x="507" y="138" text-anchor="middle" font-size="23" font-weight="800" fill="#111">read()에서 읽을 게 없으면 하나뿐인 스레드가 잠든다</text>
+
+<rect x="28" y="182" width="450" height="158" rx="12" fill="#fff" stroke="#b9d6f5" stroke-width="2"/>
+<rect x="44" y="170" width="150" height="32" rx="9" fill="#e3f0ff" stroke="#b9d6f5"/>
+<text x="119" y="192" text-anchor="middle" font-size="17" font-weight="800" fill="#111">클라이언트 상황</text>
+<circle cx="56" cy="238" r="12" fill="#4dabf7"/><text x="56" y="244" text-anchor="middle" font-size="16" font-weight="800" fill="#fff">1</text>
+<text x="78" y="244" font-size="18" font-weight="600" fill="#111">실제로 요청이 늦게 옴</text>
+<circle cx="56" cy="278" r="12" fill="#4dabf7"/><text x="56" y="284" text-anchor="middle" font-size="16" font-weight="800" fill="#fff">2</text>
+<text x="78" y="284" font-size="18" font-weight="600" fill="#111">keep-alive: 연결을 안 끊고</text>
+<text x="78" y="312" font-size="18" font-weight="600" fill="#111">다음 요청을 기다림 → 유휴 시간 15초 → close()</text>
+
+<rect x="498" y="168" width="186" height="184" rx="10" fill="#f1e8ff" stroke="#8a4fe0" stroke-width="2"/>
+<text x="591" y="192" text-anchor="middle" font-size="16" font-weight="800" fill="#111">커널 (서버 OS)</text>
+<rect x="510" y="204" width="162" height="30" rx="6" fill="#e3f0ff" stroke="#74a9e8"/>
+<text x="591" y="225" text-anchor="middle" font-size="15" font-weight="700" fill="#111">리슨 소켓</text>
+<rect x="510" y="240" width="162" height="46" rx="6" fill="#e3f0ff" stroke="#74a9e8"/>
+<text x="591" y="259" text-anchor="middle" font-size="15" font-weight="700" fill="#111">연결 소켓</text>
+<text x="591" y="278" text-anchor="middle" font-size="13.5" font-weight="600" fill="#111">(받기/보내기 버퍼)</text>
+<rect x="510" y="292" width="162" height="50" rx="6" fill="#e6d9ff" stroke="#8a4fe0"/>
+<text x="591" y="313" text-anchor="middle" font-size="14.5" font-weight="700" fill="#111">epoll: 관심 목록,</text>
+<text x="591" y="333" text-anchor="middle" font-size="14.5" font-weight="700" fill="#111">준비 목록</text>
+<path d="M684 258 H724" stroke="#222" stroke-width="2.5" marker-end="url(#ar)"/>
+<rect x="730" y="218" width="124" height="80" rx="10" fill="#cfe4ff" stroke="#74a9e8" stroke-width="2"/>
+<text x="792" y="252" text-anchor="middle" font-size="18" font-weight="800" fill="#111">웹 서버:</text>
+<text x="792" y="278" text-anchor="middle" font-size="18" font-weight="800" fill="#111">스레드 1개</text>
+
+<rect x="28" y="368" width="402" height="132" rx="12" fill="#f1f1f1" stroke="#cfcfcf" stroke-width="2"/>
+<circle cx="56" cy="398" r="15" fill="#e03131"/><path d="M49 391 l14 14 M63 391 l-14 14" stroke="#fff" stroke-width="3.5" stroke-linecap="round"/>
+<text x="82" y="405" font-size="19" font-weight="800" fill="#111">해결 ①: 스레드(프로세스)를 늘린다</text>
+<circle cx="58" cy="442" r="4" fill="#111"/>
+<text x="76" y="448" font-size="17" font-weight="600" fill="#111">스레드는 무한하지 않음, 잠드는</text>
+<text x="76" y="474" font-size="17" font-weight="600" fill="#111">문제는 그대로</text>
+
+<rect x="444" y="368" width="408" height="132" rx="12" fill="#e6f9e6" stroke="#8fd98f" stroke-width="2"/>
+<circle cx="472" cy="398" r="15" fill="#2f9e44"/><path d="M464 398 l6 6 l11 -12" fill="none" stroke="#fff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="498" y="405" font-size="19" font-weight="800" fill="#111">해결 ②: 연결과 일하는 스레드를 분리</text>
+<circle cx="474" cy="442" r="4" fill="#111"/>
+<text x="492" y="448" font-size="17" font-weight="600" fill="#111">데이터가 온 연결만 처리 → epoll</text>
+<text x="492" y="474" font-size="17" font-weight="600" fill="#111">(관심 목록 / 준비 목록)</text>
+
+<path d="M426 520 h28 v20 h14 l-28 26 l-28 -26 h14 z" fill="#1c6cf2"/>
+
+<!-- 문제 B -->
+<rect x="14" y="572" width="852" height="368" rx="18" fill="#fff" stroke="#f08c00" stroke-width="2.5"/>
+<rect x="28" y="586" width="120" height="46" rx="10" fill="#f76707"/>
+<text x="88" y="618" text-anchor="middle" font-size="24" font-weight="800" fill="#fff">문제 B</text>
+<rect x="162" y="586" width="690" height="46" rx="10" fill="#ffe8cc"/>
+<text x="507" y="618" text-anchor="middle" font-size="23" font-weight="800" fill="#111">요청을 처리하는 스레드가 서버 일 때문에 또 잠든다</text>
+
+<circle cx="56" cy="668" r="6" fill="#f76707"/>
+<text x="76" y="674" font-size="18" font-weight="600" fill="#111">파일 읽기, DB 같은 I/O를</text>
+<text x="76" y="700" font-size="18" font-weight="600" fill="#111">기다리는 시간 발생</text>
+<circle cx="56" cy="734" r="6" fill="#f76707"/>
+<text x="76" y="740" font-size="18" font-weight="600" fill="#111">그동안 CPU가 논다</text>
+<rect x="28" y="768" width="360" height="158" rx="12" fill="#e6f9e6" stroke="#8fd98f" stroke-width="2"/>
+<circle cx="56" cy="800" r="15" fill="#2f9e44"/><path d="M48 800 l6 6 l11 -12" fill="none" stroke="#fff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="82" y="806" font-size="19" font-weight="800" fill="#111">해결: 스레드를 여러 개 만들자</text>
+<text x="82" y="836" font-size="19" font-weight="800" fill="#111">→ 스레드 풀 (워커)</text>
+<circle cx="58" cy="870" r="4" fill="#111"/>
+<text x="76" y="876" font-size="16.5" font-weight="600" fill="#111">하나가 잠들어도 다른 스레드가 일한다</text>
+<circle cx="58" cy="900" r="4" fill="#111"/>
+<text x="76" y="906" font-size="16.5" font-weight="600" fill="#111">CPU 코어를 여러 개 쓴다</text>
+
+<rect x="404" y="648" width="448" height="156" rx="12" fill="#fff" stroke="#d9d9d9" stroke-width="2"/>
+<rect x="522" y="636" width="212" height="28" rx="8" fill="#e3f0ff" stroke="#b9d6f5"/>
+<text x="628" y="656" text-anchor="middle" font-size="15.5" font-weight="800" fill="#111">스레드 풀 (워커, 예: 4개)</text>
+<g transform="translate(462,702)"><circle cx="0" cy="0" r="17" fill="#ffd9a8" stroke="#8a5a2b" stroke-width="1.5"/><path d="M-19 -4 A19 19 0 0 1 19 -4 Z" fill="#f5b301" stroke="#8a6a00" stroke-width="1.5"/><rect x="-23" y="-6" width="46" height="5" rx="2.5" fill="#f5b301" stroke="#8a6a00" stroke-width="1.2"/><circle cx="-6" cy="4" r="1.8" fill="#333"/><circle cx="6" cy="4" r="1.8" fill="#333"/><path d="M-5 10 Q0 14 5 10" fill="none" stroke="#333" stroke-width="1.5" stroke-linecap="round"/><path d="M24 -20 l6 -7 M29 -13 l9 -4 M30 -4 l9 0" stroke="#2f9e44" stroke-width="2.2" stroke-linecap="round"/><path d="M-22 42 Q-22 20 0 20 Q22 20 22 42 Z" fill="#4dabf7" stroke="#1971c2" stroke-width="1.5"/><rect x="-40" y="52" width="80" height="26" rx="8" fill="#d3f9d8" stroke="#69db7c"/><text x="0" y="70" text-anchor="middle" font-family="'Noto Sans KR','Noto Sans CJK KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif" font-size="14" font-weight="700" fill="#1b5e20">일하는 중</text></g><g transform="translate(570,702)"><circle cx="0" cy="0" r="17" fill="#ffd9a8" stroke="#8a5a2b" stroke-width="1.5"/><path d="M-19 -4 A19 19 0 0 1 19 -4 Z" fill="#f5b301" stroke="#8a6a00" stroke-width="1.5"/><rect x="-23" y="-6" width="46" height="5" rx="2.5" fill="#f5b301" stroke="#8a6a00" stroke-width="1.2"/><path d="M-9 4 h6 M3 4 h6" stroke="#333" stroke-width="1.6" stroke-linecap="round"/><path d="M-3 11 h6" stroke="#333" stroke-width="1.5" stroke-linecap="round"/><text x="22" y="-14" font-family="'Noto Sans KR','Noto Sans CJK KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif" font-size="15" font-weight="700" fill="#3b5bdb">z</text><text x="32" y="-24" font-family="'Noto Sans KR','Noto Sans CJK KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif" font-size="19" font-weight="700" fill="#3b5bdb">Z</text><path d="M-22 42 Q-22 20 0 20 Q22 20 22 42 Z" fill="#4dabf7" stroke="#1971c2" stroke-width="1.5"/><rect x="-40" y="52" width="80" height="26" rx="8" fill="#e7ecff" stroke="#91a7ff"/><text x="0" y="70" text-anchor="middle" font-family="'Noto Sans KR','Noto Sans CJK KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif" font-size="14" font-weight="700" fill="#27408b">잠자는 중</text></g><g transform="translate(678,702)"><circle cx="0" cy="0" r="17" fill="#ffd9a8" stroke="#8a5a2b" stroke-width="1.5"/><path d="M-19 -4 A19 19 0 0 1 19 -4 Z" fill="#f5b301" stroke="#8a6a00" stroke-width="1.5"/><rect x="-23" y="-6" width="46" height="5" rx="2.5" fill="#f5b301" stroke="#8a6a00" stroke-width="1.2"/><circle cx="-6" cy="4" r="1.8" fill="#333"/><circle cx="6" cy="4" r="1.8" fill="#333"/><path d="M-5 10 Q0 14 5 10" fill="none" stroke="#333" stroke-width="1.5" stroke-linecap="round"/><path d="M24 -20 l6 -7 M29 -13 l9 -4 M30 -4 l9 0" stroke="#2f9e44" stroke-width="2.2" stroke-linecap="round"/><path d="M-22 42 Q-22 20 0 20 Q22 20 22 42 Z" fill="#4dabf7" stroke="#1971c2" stroke-width="1.5"/><rect x="-40" y="52" width="80" height="26" rx="8" fill="#d3f9d8" stroke="#69db7c"/><text x="0" y="70" text-anchor="middle" font-family="'Noto Sans KR','Noto Sans CJK KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif" font-size="14" font-weight="700" fill="#1b5e20">일하는 중</text></g><g transform="translate(786,702)"><circle cx="0" cy="0" r="17" fill="#ffd9a8" stroke="#8a5a2b" stroke-width="1.5"/><path d="M-19 -4 A19 19 0 0 1 19 -4 Z" fill="#f5b301" stroke="#8a6a00" stroke-width="1.5"/><rect x="-23" y="-6" width="46" height="5" rx="2.5" fill="#f5b301" stroke="#8a6a00" stroke-width="1.2"/><path d="M-9 4 h6 M3 4 h6" stroke="#333" stroke-width="1.6" stroke-linecap="round"/><path d="M-3 11 h6" stroke="#333" stroke-width="1.5" stroke-linecap="round"/><text x="22" y="-14" font-family="'Noto Sans KR','Noto Sans CJK KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif" font-size="15" font-weight="700" fill="#3b5bdb">z</text><text x="32" y="-24" font-family="'Noto Sans KR','Noto Sans CJK KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif" font-size="19" font-weight="700" fill="#3b5bdb">Z</text><path d="M-22 42 Q-22 20 0 20 Q22 20 22 42 Z" fill="#4dabf7" stroke="#1971c2" stroke-width="1.5"/><rect x="-40" y="52" width="80" height="26" rx="8" fill="#e7ecff" stroke="#91a7ff"/><text x="0" y="70" text-anchor="middle" font-family="'Noto Sans KR','Noto Sans CJK KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif" font-size="14" font-weight="700" fill="#27408b">잠자는 중</text></g>
+<rect x="404" y="816" width="448" height="44" rx="10" fill="#fff9db" stroke="#ffe066" stroke-width="2"/>
+<rect x="416" y="824" width="56" height="28" rx="7" fill="#ffe066"/>
+<text x="444" y="844" text-anchor="middle" font-size="16" font-weight="800" fill="#111">고민</text>
+<text x="482" y="844" font-size="16" font-weight="700" fill="#111">몇 개 만들까? CPU 코어 수 + I/O 대기 정도</text>
+
+<rect x="404" y="868" width="448" height="58" rx="10" fill="#fff4e6" stroke="#ffc078" stroke-width="2"/>
+<rect x="416" y="883" width="56" height="28" rx="7" fill="#f76707"/>
+<text x="444" y="903" text-anchor="middle" font-size="16" font-weight="800" fill="#fff">해답</text>
+<text x="482" y="892" font-size="16" font-weight="800" fill="#111">워커 수 ≈ 코어 수 ×</text>
+<text x="482" y="914" font-size="16" font-weight="800" fill="#111">(1 + 기다리는 시간 ÷ 계산하는 시간)</text>
+<g transform="translate(0,64)">
+<path d="M426 880 h28 v20 h14 l-28 26 l-28 -26 h14 z" fill="#f76707"/>
+
+<!-- 우리의 선택 -->
+<rect x="14" y="932" width="852" height="502" rx="18" fill="#fff" stroke="#2f9e44" stroke-width="2.5"/>
+<rect x="28" y="946" width="148" height="46" rx="10" fill="#2f9e44"/>
+<text x="102" y="978" text-anchor="middle" font-size="24" font-weight="800" fill="#fff">우리 서버</text>
+<rect x="190" y="946" width="662" height="46" rx="10" fill="#d3f9d8"/>
+<text x="521" y="978" text-anchor="middle" font-size="23" font-weight="800" fill="#111">epoll + 스레드 풀</text>
+
+<rect x="28" y="1006" width="824" height="130" rx="12" fill="#f6fff6" stroke="#8fd98f" stroke-width="2"/>
+<rect x="44" y="1020" width="32" height="28" rx="7" fill="#1c6cf2"/><text x="60" y="1040" text-anchor="middle" font-size="17" font-weight="800" fill="#fff">A</text>
+<text x="90" y="1041" font-size="18.5" font-weight="700" fill="#111">조용한 연결은 epoll이 지켜본다</text>
+<rect x="44" y="1058" width="32" height="28" rx="7" fill="#f76707"/><text x="60" y="1078" text-anchor="middle" font-size="17" font-weight="800" fill="#fff">B</text>
+<text x="90" y="1079" font-size="18.5" font-weight="700" fill="#111">한 워커가 I/O로 잠들어도 다른 워커가 계속 일한다</text>
+<circle cx="60" cy="1110" r="13" fill="#2f9e44"/><path d="M53 1110 l5 5 l9 -10" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="90" y="1117" font-size="18.5" font-weight="800" fill="#111">epoll과 워커 스레드를 함께 쓴다</text>
+
+<circle cx="52" cy="1164" r="14" fill="#2f9e44"/><path d="M45 1164 l5 5 l9 -10" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="76" y="1171" font-size="19" font-weight="800" fill="#111">epoll + 스레드 풀을 두 가지 방식으로 각각 구현했다</text>
+
+<rect x="28" y="1188" width="404" height="232" rx="12" fill="#f6fff6" stroke="#8fd98f" stroke-width="2"/>
+<rect x="42" y="1200" width="70" height="28" rx="8" fill="#2f9e44"/><text x="77" y="1220" text-anchor="middle" font-size="15.5" font-weight="800" fill="#fff">방식 1</text>
+<text x="122" y="1220" font-size="16.5" font-weight="800" fill="#111">워커 스레드마다 epoll</text>
+<rect x="136" y="1240" width="188" height="28" rx="7" fill="#e3f0ff" stroke="#74a9e8" stroke-width="1.5"/>
+<text x="230" y="1259" text-anchor="middle" font-size="13.5" font-weight="800" fill="#111">리슨 소켓 (워커들이 공유)</text>
+<rect x="40" y="1296" width="86" height="84" rx="9" fill="#fff" stroke="#2f9e44" stroke-width="2"/>
+<text x="83" y="1317" text-anchor="middle" font-size="14" font-weight="800" fill="#111">워커 1</text>
+<rect x="47" y="1327" width="72" height="44" rx="6" fill="#e6d9ff" stroke="#8a4fe0"/>
+<text x="83" y="1346" text-anchor="middle" font-size="13.5" font-weight="800" fill="#111">epoll</text>
+<text x="83" y="1363" text-anchor="middle" font-size="11.5" font-weight="600" fill="#111">연결 여러 개</text>
+<path d="M230 1268 V1282 H83 V1290" fill="none" stroke="#222" stroke-width="2" marker-end="url(#ar)"/><rect x="138" y="1296" width="86" height="84" rx="9" fill="#fff" stroke="#2f9e44" stroke-width="2"/>
+<text x="181" y="1317" text-anchor="middle" font-size="14" font-weight="800" fill="#111">워커 2</text>
+<rect x="145" y="1327" width="72" height="44" rx="6" fill="#e6d9ff" stroke="#8a4fe0"/>
+<text x="181" y="1346" text-anchor="middle" font-size="13.5" font-weight="800" fill="#111">epoll</text>
+<text x="181" y="1363" text-anchor="middle" font-size="11.5" font-weight="600" fill="#111">연결 여러 개</text>
+<path d="M230 1268 V1282 H181 V1290" fill="none" stroke="#222" stroke-width="2" marker-end="url(#ar)"/><rect x="236" y="1296" width="86" height="84" rx="9" fill="#fff" stroke="#2f9e44" stroke-width="2"/>
+<text x="279" y="1317" text-anchor="middle" font-size="14" font-weight="800" fill="#111">워커 3</text>
+<rect x="243" y="1327" width="72" height="44" rx="6" fill="#e6d9ff" stroke="#8a4fe0"/>
+<text x="279" y="1346" text-anchor="middle" font-size="13.5" font-weight="800" fill="#111">epoll</text>
+<text x="279" y="1363" text-anchor="middle" font-size="11.5" font-weight="600" fill="#111">연결 여러 개</text>
+<path d="M230 1268 V1282 H279 V1290" fill="none" stroke="#222" stroke-width="2" marker-end="url(#ar)"/><rect x="334" y="1296" width="86" height="84" rx="9" fill="#fff" stroke="#2f9e44" stroke-width="2"/>
+<text x="377" y="1317" text-anchor="middle" font-size="14" font-weight="800" fill="#111">워커 4</text>
+<rect x="341" y="1327" width="72" height="44" rx="6" fill="#e6d9ff" stroke="#8a4fe0"/>
+<text x="377" y="1346" text-anchor="middle" font-size="13.5" font-weight="800" fill="#111">epoll</text>
+<text x="377" y="1363" text-anchor="middle" font-size="11.5" font-weight="600" fill="#111">연결 여러 개</text>
+<path d="M230 1268 V1282 H377 V1290" fill="none" stroke="#222" stroke-width="2" marker-end="url(#ar)"/>
+<text x="230" y="1404" text-anchor="middle" font-size="14" font-weight="600" fill="#333">받은 워커가 연결을 끝까지 맡아서 락이 필요 없다</text>
+
+<rect x="448" y="1188" width="404" height="232" rx="12" fill="#f3f6ff" stroke="#91a7ff" stroke-width="2"/>
+<rect x="462" y="1200" width="70" height="28" rx="8" fill="#3b5bdb"/><text x="497" y="1220" text-anchor="middle" font-size="15.5" font-weight="800" fill="#fff">방식 2</text>
+<text x="542" y="1220" font-size="16.5" font-weight="800" fill="#111">epoll 하나 + 작업 큐</text>
+<rect x="462" y="1282" width="112" height="56" rx="7" fill="#e6d9ff" stroke="#8a4fe0" stroke-width="1.5"/><text x="518.0" y="1307.0" text-anchor="middle" font-size="14" font-weight="800" fill="#111">메인 스레드</text><text x="518.0" y="1324.0" text-anchor="middle" font-size="12.5" font-weight="700" fill="#111">epoll 1개</text>
+<path d="M574 1310 L600 1310" stroke="#222" stroke-width="2" marker-end="url(#ar)"/>
+<rect x="606" y="1282" width="84" height="56" rx="7" fill="#fff9db" stroke="#f2c200" stroke-width="1.5"/><text x="648.0" y="1315.0" text-anchor="middle" font-size="14.5" font-weight="800" fill="#111">작업 큐</text>
+<path d="M690 1310 L716 1310" stroke="#222" stroke-width="2" marker-end="url(#ar)"/>
+<rect x="722" y="1262" width="116" height="28" rx="7" fill="#fff" stroke="#3b5bdb" stroke-width="1.5"/><text x="780.0" y="1281.0" text-anchor="middle" font-size="13.5" font-weight="800" fill="#111">워커 1</text><rect x="722" y="1296" width="116" height="28" rx="7" fill="#fff" stroke="#3b5bdb" stroke-width="1.5"/><text x="780.0" y="1315.0" text-anchor="middle" font-size="13.5" font-weight="800" fill="#111">워커 2</text><rect x="722" y="1330" width="116" height="28" rx="7" fill="#fff" stroke="#3b5bdb" stroke-width="1.5"/><text x="780.0" y="1349.0" text-anchor="middle" font-size="13.5" font-weight="800" fill="#111">워커 N</text>
+<text x="650" y="1404" text-anchor="middle" font-size="14" font-weight="600" fill="#333">메인이 준비된 연결을 큐에 넣고, 워커가 꺼내 처리한다</text>
+
+</g>
+<metadata><c2pa:manifest>AAAWgmp1bWIAAAAeanVtZGMycGEAEQAQgAAAqgA4m3EDYzJwYQAAABZcanVtYgAAAEdqdW1kYzJtYQARABCAAACqADibcQN1cm46YzJwYTpiMTJiZmM1OC1iZjhkLTQzMTctYmNhMS1jNGRjYTkyNmM0OGMAAAADl2p1bWIAAAApanVtZGMyYXMAEQAQgAAAqgA4m3EDYzJwYS5hc3NlcnRpb25zAAAAALxqdW1iAAAARGp1bWRjYm9yABEAEIAAAKoAOJtxE2MycGEuaW5ncmVkaWVudC52MwAAAAAYYzJzaK/Z1JKORX0Wm6vSnBTcULcAAABwY2JvcqNpZGM6Zm9ybWF0bWltYWdlL3N2Zyt4bWxqaW5zdGFuY2VJRHgseG1wOmlpZDo3MmQzZmQ5NC1iZmM0LTQ0NTYtODlhYi1mOWZmNmFlYjI0NTRscmVsYXRpb25zaGlwaHBhcmVudE9mAAAB4mp1bWIAAABBanVtZGNib3IAEQAQgAAAqgA4m3ETYzJwYS5hY3Rpb25zLnYyAAAAABhjMnNodBUI/F9RCGNS5ZcYqStinAAAAZljYm9yomdhY3Rpb25zgqJmYWN0aW9ua2MycGEub3BlbmVkanBhcmFtZXRlcnOha2luZ3JlZGllbnRzgaJjdXJseC1zZWxmI2p1bWJmPWMycGEuYXNzZXJ0aW9ucy9jMnBhLmluZ3JlZGllbnQudjNkaGFzaFgg7h42r/MS08rhLtSuw8I/XoPn96OVLFmvE0s+rSJyHJykZmFjdGlvbngdY29tLmFudGhyb3BpYy5jbGF1ZGUucHJvdmlkZWRqcGFyYW1ldGVyc6F4H2NvbS5hbnRocm9waWMub3JpZ2luLWNvbmZpZGVuY2VndW5rbm93bmtkZXNjcmlwdGlvbnhmQ2xhdWRlIHByb3ZpZGVkIHRoaXMgZmlsZSBhdCB0aGUgcmVxdWVzdCBvZiBhIHVzZXIgYW5kIG1heSBoYXZlIGNyZWF0ZWQgb3IgbW9kaWZpZWQgdGhlIGZpbGUgY29udGVudHMubXNvZnR3YXJlQWdlbnShZG5hbWVmQ2xhdWRlcmFsbEFjdGlvbnNJbmNsdWRlZPUAAADIanVtYgAAAEBqdW1kY2JvcgARABCAAACqADibcRNjMnBhLmhhc2guZGF0YQAAAAAYYzJzaGdna58LK38NQU0OwQLuq+gAAACAY2JvcqVjYWxnZnNoYTI1NmNwYWRMAAAAAAAAAAAAAAAAZGhhc2hYIODKIbd8mWL/FcuBvorbmQN0GevoutHIk9XdElBjA1aaZG5hbWVuanVtYmYgbWFuaWZlc3RqZXhjbHVzaW9uc4GiZXN0YXJ0GUwBZmxlbmd0aBkeBAAAAj5qdW1iAAAAJ2p1bWRjMmNsABEAEIAAAKoAOJtxA2MycGEuY2xhaW0udjIAAAACD2Nib3KlY2FsZ2ZzaGEyNTZpc2lnbmF0dXJleE1zZWxmI2p1bWJmPS9jMnBhL3VybjpjMnBhOmIxMmJmYzU4LWJmOGQtNDMxNy1iY2ExLWM0ZGNhOTI2YzQ4Yy9jMnBhLnNpZ25hdHVyZWppbnN0YW5jZUlEeCx4bXA6aWlkOjUxZjEzY2MwLTI5ODAtNGI5ZS1iNjU1LTBhNGYyYzZiNGQ2Y3JjcmVhdGVkX2Fzc2VydGlvbnODomN1cmx4LXNlbGYjanVtYmY9YzJwYS5hc3NlcnRpb25zL2MycGEuaW5ncmVkaWVudC52M2RoYXNoWCDuHjav8xLTyuEu1K7Dwj9eg+f3o5UsWa8TSz6tInIcnKJjdXJseCpzZWxmI2p1bWJmPWMycGEuYXNzZXJ0aW9ucy9jMnBhLmFjdGlvbnMudjJkaGFzaFgghDPivA7+3KKmqoY83hJ5c8mVIGQktKZcTiwQnhgQuF6iY3VybHgpc2VsZiNqdW1iZj1jMnBhLmFzc2VydGlvbnMvYzJwYS5oYXNoLmRhdGFkaGFzaFggYHCG0S2NZqhS3k4Q4WTMz0V4pcP+q/OTuLLsWN/xlYh0Y2xhaW1fZ2VuZXJhdG9yX2luZm+jZG5hbWVvQW50aHJvcGljIEZpbGVzZ3ZlcnNpb25lMS4wLjBrc3BlY1ZlcnNpb25lMi40LjAAABA4anVtYgAAAChqdW1kYzJjcwARABCAAACqADibcQNjMnBhLnNpZ25hdHVyZQAAABAIY2JvctKEWQISogEmGCFZAgowggIGMIIBjaADAgECAhRA5aAK7sI50L64g/oGQgU9Z1UTADAKBggqhkjOPQQDAzBJMRcwFQYDVQQKEw5BbnRocm9waWMsIFBCQzEuMCwGA1UEAxMlQW50aHJvcGljIENvbnRlbnQgQ3JlZGVudGlhbHMgUm9vdCBDQTAeFw0yNjA4MDcxODQzNTZaFw0yODA4MDYxOTQzNTZaMEQxFzAVBgNVBAoTDkFudGhyb3BpYywgUEJDMSkwJwYDVQQDEyBBbnRocm9waWMgQ2xhdWRlIENvbnRlbnQgU2lnbmluZzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJh6CmvLUBgFFNU0vUKlOVtE6djd17L5SuwX0LemFisBM3dkd/3cyjxFA3Qo5S46fX0/ihY0VZ7mfb9KF703t5OjWDBWMA4GA1UdDwEB/wQEAwIHgDAVBgNVHSUEDjAMBgorBgEEAYPoXgIBMAwGA1UdEwEB/wQCMAAwHwYDVR0jBBgwFoAUzlHiBIFOZFsj+OPEz5o+nMHXXMIwCgYIKoZIzj0EAwMDZwAwZAIwMXMdFJ4BetLLVY7ORuE9noqbbAZOZn/aArXyTwFAZfKrPzxF2vPoJNf1+UCdg1XGAjBwX1zd9WGqYkqmL5SFqw1QySjr1zJfpJM9+1rdDwSPLMOPOjKuiXjoU/pUUeG9RwmhY3BhZFkNngAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPZYQDr2k8wh3nKqJXjGiwEA0ImVg1ZRyu6h5l5dBgVlPwoKQlO6Yzl0p4SE2f4WGPZiixBXPieUPQ5vEuld3I6eGaY=</c2pa:manifest></metadata></svg>
