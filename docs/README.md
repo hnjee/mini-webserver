@@ -54,4 +54,4 @@
 | 5 동시성 | [step-5-concurrency](./steps/step-5-concurrency/README.md) |
 | 6 리버스 프록시 | [step-6-reverse-proxy](./steps/step-6-reverse-proxy/README.md) |
 | 7 안정성 | [step-7-robustness](./steps/step-7-robustness/README.md) |
-| 8 테스트와 최종 선택 | [step-8-final](./steps/step-8-final/README.md) |
+| 8 현재 브랜치 최종 검증 | [step-8-final](./steps/step-8-final/README.md) |

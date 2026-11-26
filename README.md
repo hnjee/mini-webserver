@@ -9,7 +9,7 @@ flowchart LR
     A["DESIGN.md<br/>팀 공통 설계"] --> B["docs/progress.md<br/>전체 진행 현황"] --> C["docs/steps/step-N/<br/>Step별 추적·결정"]
 ```
 
-- 목표: C와 POSIX 소켓으로 웹 서버를 만들고 리버스 프록시까지 확장한다 (Step 0~8).
+- 목표: C와 POSIX 소켓으로 웹 서버를 만들고 리버스 프록시까지 확장한다 (Step 0~8). 이 브랜치의 Step 8은 자체 검증만 한다.
 - 문서 전체 안내: [docs/README.md](./docs/README.md)
 
 ## 알고 싶은 것으로 찾기

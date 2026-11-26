@@ -39,6 +39,7 @@
 | [Step 5](./steps/step-5-concurrency/README.md) | 11 | 기능, 부하, 단위, 회귀 | 11 | 0 |
 | [Step 6](./steps/step-6-reverse-proxy/README.md) | 14 | 기능, 단위, 회귀 | 14 (독립 검증) | 0 |
 | [Step 7](./steps/step-7-robustness/README.md) | 17 | 기능, 단위, 회귀, 메모리 | 17 | 0 |
-| [Step 8](./steps/step-8-final/README.md) | 2 | 부하, 회귀 | 0 | 0 |
+| [Step 8](./steps/step-8-final/README.md) | 2 | 부하, 회귀 | 2 (현행 계약 독립 검증) | 0 |
 
 - Step 5 TC-5-08은 이전 기능 증거와 대체 관계를 대조하고, 빠졌던 브라우저 TC-3-01을 재실행해 완료했다. Step 4가 대체한 TC-3-18의 옛 기대값은 제외한다.
+- Step 8 TC-8-01은 현재 브랜치의 현행 계약을 대상으로 한다. 고유 ID 118개 중 현행 112개를 새로 확인했고, Step 1 에코 서버 시점의 6개는 비적용이다 ([TC별 대조표](../.agent/reviews/step8-verify/tc-map.md), 로컬 전용).

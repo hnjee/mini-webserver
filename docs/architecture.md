@@ -18,25 +18,28 @@
 | HTTP 버전·`Host` 규칙 | 1.0·1.1 허용, `Host`는 1.1에서만 필수 | [Step 2](./steps/step-2-http-parse/decision.md) (D-12) |
 | 파싱 결과 구조 | 값 복사 + 전체 헤더 목록 (헤더 수 상한은 설계) | [Step 2](./steps/step-2-http-parse/decision.md) |
 | 경로 탈출 방지 · 큰 파일 전송 | 문자열 검사 + `realpath` 접두 비교, 64KB 고정 버퍼 조각 전송 (구현 검증 통과) | [Step 3](./steps/step-3-static/decision.md) (D-21, D-22) |
-| 남은 바이트 처리 · 타임아웃 | 미정 | [Step 4](./steps/step-4-post-keepalive/decision.md) |
+| 남은 바이트 처리 · 타임아웃 | 요청 본문 길이만 처리하고 남는 바이트는 다음 요청에 보존; Step 4의 호출별 5초 제한은 Step 5의 무진행 5초 정책으로 갱신 | [Step 4](./steps/step-4-post-keepalive/decision.md) · [Step 5](./steps/step-5-concurrency/decision.md) |
 | 동시성 방식 | I/O 멀티플렉싱·5초 무진행 정책 채택; `epoll` 등 내부 설계 구현은 영향 한정 독립 검증 통과 | [Step 5](./steps/step-5-concurrency/decision.md) (D-55~D-59) |
-| 라우팅 설정 형식 · 백엔드 연결 재사용 | `-c` 선택 인자의 `route` 줄, 가장 긴 접두 경로·규칙별 라운드 로빈, 요청마다 새 연결(재사용 없음). 클라이언트 연결은 끝을 알면 유지, EOF 응답은 닫기. 검토 차단 해소·구현 전 | [Step 6](./steps/step-6-reverse-proxy/decision.md) (D-60~D-67) |
-| 종료 방식 | 미정 | [Step 7](./steps/step-7-robustness/decision.md) |
+| 라우팅 설정 형식 · 백엔드 연결 재사용 | `-c` 선택 인자의 `route` 줄, 가장 긴 접두 경로·규칙별 라운드 로빈, 요청마다 새 연결(재사용 없음). 클라이언트 연결은 끝을 알면 유지, EOF 응답은 닫기. 구현·독립 검증 통과 | [Step 6](./steps/step-6-reverse-proxy/decision.md) (D-60~D-67) |
+| 종료 방식 | SIGINT·SIGTERM 때 새 연결 중단, 진행 중 요청만 최대 10초 안에 마무리하고 종료 코드 0 | [Step 7](./steps/step-7-robustness/decision.md) (D-68~D-72) |
 
 ## 모듈 구성
 
-Step을 진행하며 실제로 만든 모듈만 추가한다.
+현재 브랜치의 주요 모듈이다. 각 Step의 상세 구조는 해당 README를 본다.
 
 | 모듈 | 파일 | 역할 | 추가된 Step |
 | ---- | ---- | ---- | ----------- |
-| 실행 인자 | `src/options.c`, `src/options.h` | 포트·정적 루트 인자 검사 | 0 |
-| 진입점 | `src/main.c` | 인자 확인, `SIGPIPE` 무시, 듣는 소켓 열기, 연결 처리는 `server_loop`에 맡김 | 0, 1, 2, 5 |
+| 실행 인자 | `src/options.c`, `src/options.h` | 포트·정적 루트·라우팅 파일 인자 검사 | 0, 6 |
+| 진입점 | `src/main.c` | 인자·라우팅 설정·신호 처리 준비, 듣는 소켓 열기, 연결 처리는 `server_loop`에 맡김 | 0, 1, 2, 5~7 |
 | 이벤트 루프 | `src/server_loop.c`, `src/server_loop.h` | `epoll` 레벨 트리거, `accept`, 연결 목록·내부 실행 목록·마감 확인·끝난 연결 정리 | 5 |
 | 듣는 소켓 | `src/listener.c`, `src/listener.h` | `socket`·`SO_REUSEADDR`·`bind`·`listen` | 1 |
 | 에코 | `src/echo.c`, `src/echo.h` | 연결 하나의 읽기·쓰기 에코 (Step 2부터 서버는 호출하지 않고 회귀 시험용으로 유지) | 1 |
 | HTTP 파서 | `src/http_parser.c`, `src/http_parser.h` | 받은 바이트를 요청 구조로 판정(불완전·완료·400·501·505), 소켓 I/O 없음 | 2 |
 | 응답 생성 | `src/http_response.c`, `src/http_response.h` | 상태·본문으로 HTTP 응답을 만들어 끝까지 씀 (`Content-Length` 자동 계산). Step 3에서 머리만 쓰는 함수(파일 응답), 상태 응답 함수(오류·301), 301·403·404·500·`Location` 추가. Step 5에서 같은 바이트를 버퍼에 쓰는 함수 추가 | 2, 3, 5 |
-| 연결 처리 | `src/http_conn.c`, `src/http_conn.h` | 연결 하나의 상태 구조체: 입력 8KB·출력 64KB 버퍼, 상태별 처리 함수, 5초 무진행 마감, 파일 fd 닫기 | 2, 3, 5 |
+| 연결 처리 | `src/http_conn.c`, `src/http_conn.h` | 연결별 HTTP·프록시 상태, 5초 무진행 마감, 파일·백엔드 fd 정리 | 2~7 |
 | 정적 파일 | `src/static_file.c`, `src/static_file.h` | 요청 대상 판정(경로 탈출 방지·디렉터리·`index.html`), 파일 열기, 64KB 조각 전송·조각 하나 읽기 | 3, 5 |
 | MIME | `src/mime.c`, `src/mime.h` | 확장자로 `Content-Type` 결정(7개, 나머지 `octet-stream`) | 3 |
 | 쓰기 보조 | `src/io.c`, `src/io.h` | 부분 `write`를 이어 쓰는 `io_write_all` | 2 |
+| 라우팅 | `src/route.c`, `src/route.h` | 설정 검사·백엔드 선택 | 6 |
+| 프록시 | `src/proxy.c`, `src/proxy.h` | 백엔드 요청·응답 머리 처리 | 6 |
+| 접근 로그 | `src/access_log.c`, `src/access_log.h` | 요청별 결과 기록 | 7 |
