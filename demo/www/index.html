@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mini-webserver 시연 · 오늘의 카페 메뉴</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <div class="brand">mini-webserver <span>시연</span></div>
+    <div class="tabs" role="tablist" aria-label="시연 장면">
+      <button type="button" role="tab" id="tab-service" aria-controls="panel-service" aria-selected="true">서비스 체험</button>
+      <button type="button" role="tab" id="tab-network" aria-controls="panel-network" aria-selected="false" tabindex="-1">통신 보기</button>
+      <button type="button" role="tab" id="tab-stress" aria-controls="panel-stress" aria-selected="false" tabindex="-1">장애와 동시성</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- 1. 서비스 체험 -->
+  <section class="panel" role="tabpanel" id="panel-service" aria-labelledby="tab-service" tabindex="0">
+    <div class="intro">
+      <h1>화면은 서버가, 메뉴는 백엔드가</h1>
+      <p>페이지와 사진은 mini-webserver가 직접 보낸다. 메뉴 정보는 별도 프로그램(백엔드)이 돌려준다. 같은 백엔드를 A·B 두 개 띄워 번갈아 맡긴다.</p>
+    </div>
+
+    <div class="split">
+      <div class="app">
+        <div class="app-head">
+          <div>
+            <h2>오늘의 카페 메뉴</h2>
+            <p class="sub">읽기 전용 데모 데이터 · 주문 기능은 없다</p>
+          </div>
+          <button type="button" class="primary" id="load-menu">메뉴 불러오기</button>
+        </div>
+        <p class="empty" id="menu-empty">버튼을 누르면 <code>GET /api/menu</code>를 보낸다.</p>
+        <p class="src-line" id="src-line" hidden></p>
+        <ul class="menu" id="menu-list"></ul>
+
+        <details class="memo">
+          <summary>메모 보내 보기 <span>· 서버가 받은 그대로 돌려준다, 저장되지 않음</span></summary>
+          <div class="memo-row">
+            <label for="memo-in" class="vh">메모</label>
+            <input id="memo-in" value="라테는 연하게 부탁해요" maxlength="200">
+            <button type="button" class="secondary" id="send-memo">보내기</button>
+          </div>
+          <p class="memo-out" id="memo-out" aria-live="polite"></p>
+        </details>
+      </div>
+
+      <aside class="who" aria-label="이번 응답">
+        <p class="label">메뉴를 돌려준 백엔드</p>
+        <div class="instances">
+          <div class="inst" data-inst="A"><b>A</b><span>127.0.0.1:8001</span></div>
+          <div class="inst" data-inst="B"><b>B</b><span>127.0.0.1:8002</span></div>
+        </div>
+        <p class="who-line" id="who-line" aria-live="polite">아직 응답이 없다.</p>
+        <ol class="history" id="history" aria-label="최근 응답한 백엔드 순서"></ol>
+        <p class="same" id="same-line"></p>
+        <p class="static-line" id="static-line"></p>
+        <p class="fine">A·B 순번은 <code>/api/</code> 요청 전체가 함께 쓴다. 다른 요청이 끼면 순서가 밀린다.</p>
+      </aside>
+    </div>
+  </section>
+
+  <!-- 2. 통신 보기 -->
+  <section class="panel" role="tabpanel" id="panel-network" aria-labelledby="tab-network" tabindex="0" hidden>
+    <div class="intro">
+      <h1>요청 하나가 지나간 길</h1>
+      <p>서비스 체험 탭에서 실제로 보낸 요청이 여기에 쌓인다. 한 건을 고르면 그 요청이 지나간 경로와 주고받은 머리를 보여 준다.</p>
+    </div>
+
+    <div class="net">
+      <figure class="flow" id="flow" data-route="none">
+        <div class="node n-browser"><b>브라우저</b><span>이 페이지</span></div>
+        <div class="edge"><span id="edge-in">요청</span></div>
+        <div class="node n-server">
+          <b>mini-webserver <span>:8080</span></b>
+          <ol class="stages">
+            <li>연결 받기 <small>epoll 루프</small></li>
+            <li>요청 해석 <small>머리 끝 · 오류 판정</small></li>
+            <li>경로 나누기 <small><code>/api/</code> · <code>/echo</code> · 그 밖</small></li>
+          </ol>
+          <p class="workers">처리는 워커 4개가 나눠 맡는다 <small>(구현됨 · 세부 설계는 임시)</small></p>
+        </div>
+        <div class="edge"><span id="edge-out">—</span></div>
+        <div class="targets">
+          <div class="node n-static"><b>정적 파일</b><span>demo/www 폴더</span></div>
+          <div class="node n-echo"><b>/echo</b><span>서버 내부에서 본문을 되돌림</span></div>
+          <div class="node n-backend"><b>백엔드</b><span class="pair"><i data-inst="A">A :8001</i><i data-inst="B">B :8002</i></span></div>
+        </div>
+        <figcaption>구조 설명 그림이다. 패킷을 캡처한 것이 아니다. 고른 기록의 경로만 강조한다.</figcaption>
+      </figure>
+
+      <div class="net-body">
+        <aside class="log-col" aria-label="최근 기록">
+          <p class="log-title"><b>최근 기록</b> <span id="log-count">0건</span></p>
+          <p class="fine log-note">이 페이지를 연 뒤의 기록 · 최근 활동 20개까지 · 새로고침하면 사라진다</p>
+          <div class="log-empty" id="log-empty">
+            <p>아직 기록이 없다. 서비스 체험에서 메뉴를 불러오거나 메모를 보내면 여기에 쌓인다.</p>
+            <button type="button" class="secondary" id="go-service">서비스 체험으로 가기</button>
+          </div>
+          <ol class="log" id="log" aria-label="최근 요청 기록, 최근 것부터"></ol>
+        </aside>
+
+        <div class="detail" id="exchange" aria-live="polite"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. 장애와 동시성 -->
+  <section class="panel" role="tabpanel" id="panel-stress" aria-labelledby="tab-stress" tabindex="0" hidden>
+    <div class="intro">
+      <h1>기다리는 요청이 다른 요청을 막지 않는다</h1>
+      <p>3초 걸리는 메뉴 요청을 먼저 보내고 0.2초 뒤 메뉴 사진을 요청한다. 두 요청이 실제로 끝난 시각을 비교한다.</p>
+    </div>
+    <button type="button" class="primary" id="run-race">두 요청 동시에 보내기</button>
+    <div class="lanes" id="lanes">
+      <div class="axis" id="axis" aria-hidden="true"></div>
+      <div class="lane" data-lane="slow"><span class="lane-name">느린 메뉴 요청<code>/api/slow?ms=3000</code></span><div class="track"><div class="bar"></div></div><span class="lane-time">—</span></div>
+      <div class="lane" data-lane="fast"><span class="lane-name">메뉴 사진<code>/img/latte.png</code></span><div class="track"><div class="bar"></div></div><span class="lane-time">—</span></div>
+      <p class="verdict" id="race-verdict" aria-live="polite"></p>
+    </div>
+
+    <h2 class="h2">백엔드가 실패하면</h2>
+    <p class="sub">mini-webserver는 다른 백엔드로 다시 보내지 않는다. 실패를 상태 코드로 알린다.</p>
+    <div class="fails">
+      <div class="fail">
+        <h3>백엔드가 꺼져 있을 때</h3>
+        <p>연결이 거절되면 <b>502</b>를 돌려준다.</p>
+        <button type="button" class="secondary" id="run-502">요청 보내기</button>
+        <p class="fail-out" id="out-502" aria-live="polite"><code>GET /down/menu</code></p>
+      </div>
+      <div class="fail">
+        <h3>백엔드가 답하지 않을 때</h3>
+        <p>5초 동안 진행이 없으면 <b>504</b>를 돌려준다.</p>
+        <button type="button" class="secondary" id="run-504">요청 보내기</button>
+        <p class="fail-out" id="out-504" aria-live="polite"><code>GET /api/slow?ms=7000</code></p>
+      </div>
+    </div>
+    <p class="fine"><code>/down/</code>은 아무 프로그램도 듣지 않는 포트로 보내는 시연용 규칙이다. 실제 백엔드를 끄는 장면은 터미널에서 직접 한다(demo/README.md).</p>
+  </section>
+</main>
+
+<footer class="foot">
+  <details>
+    <summary>검증 기록</summary>
+    <p>현재 브랜치의 기능·부하 검증 결과는 저장소 <code>docs/steps/step-8-final/README.md</code>에 있다. 이 페이지는 성능을 측정하지 않는다.</p>
+  </details>
+</footer>
+<script src="/app.js"></script>
+</body>
+</html>
