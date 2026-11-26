@@ -484,7 +484,7 @@ static void ut22_refused(void)
     SEND(cfd, "GET /api/x HTTP/1.1\r\nHost: x\r\n\r\n");
     struct got g;
     client_recv(&s, cfd, &g, 20);
-    CHECK("UT-22 502, Connection: close, 닫힘", starts(&g, "HTTP/1.1 502 ") &&
+    CHECK("UT-22 502, Connection: close, 닫힘", starts(&g, "HTTP/1.1 502 Bad Gateway\r\n") &&
                                                  strstr(g.buf, "\r\nConnection: close\r\n") != NULL && g.eof);
     free(g.buf);
     close(cfd);
@@ -558,7 +558,7 @@ static void ut24_to_ut25_response_timeout(void)
     server_sweep_idle(&s, time(NULL) + s.response_timeout + 1);
     struct got g;
     client_recv(&s, cfd, &g, 10);
-    CHECK("UT-24 11초 뒤 504, 닫힘", starts(&g, "HTTP/1.1 504 ") && g.eof);
+    CHECK("UT-24 11초 뒤 504, 닫힘", starts(&g, "HTTP/1.1 504 Gateway Timeout\r\n") && g.eof);
     char t;
     CHECK("UT-24 백엔드 연결도 닫힘", bfd >= 0 && read(bfd, &t, 1) == 0);
     free(g.buf);
@@ -608,7 +608,7 @@ static void ut26_empty(void)
     }
     struct got g;
     client_recv(&s, cfd, &g, 20);
-    CHECK("UT-26 빈 응답 → 502, 닫힘", starts(&g, "HTTP/1.1 502 ") && g.eof);
+    CHECK("UT-26 빈 응답 → 502, 닫힘", starts(&g, "HTTP/1.1 502 Bad Gateway\r\n") && g.eof);
     free(g.buf);
     close(cfd);
     teardown(&s, lfd);
