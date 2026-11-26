@@ -1,0 +1,37 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build server",
+            "type": "shell",
+            "command": "make",
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": ["$gcc"],
+            "options": { "cwd": "${workspaceFolder}" }
+        },
+        {
+            "label": "Build server (ASan)",
+            "type": "shell",
+            "command": "make clean && make asan",
+            "group": "build",
+            "problemMatcher": ["$gcc"],
+            "options": { "cwd": "${workspaceFolder}" }
+        },
+        {
+            "label": "Run tests",
+            "type": "shell",
+            "command": "make test",
+            "group": "test",
+            "problemMatcher": ["$gcc"],
+            "options": { "cwd": "${workspaceFolder}" }
+        },
+        {
+            "label": "Clean",
+            "type": "shell",
+            "command": "make clean",
+            "group": "build",
+            "problemMatcher": [],
+            "options": { "cwd": "${workspaceFolder}" }
+        }
+    ]
+}
