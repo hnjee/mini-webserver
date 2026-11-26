@@ -54,7 +54,7 @@ TCP에서 먼저 연결을 끊은 쪽은 바로 사라지지 않고 `TIME_WAIT` 
 
 ## 이 단계에서 정한 것
 
-| # | 결정 | 이유 |
+| #&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | 결정 | 이유 |
 | - | ---- | ---- |
 | 1-1 | `socket()` → `setsockopt(SO_REUSEADDR)` → `bind()` → `listen()` → `accept()` 반복 흐름으로 만든다. | 과제의 필수 구현 흐름이에요. (DESIGN.md 제안과 같음) |
 | 1-2 | `SO_REUSEADDR`는 `bind()` 전에 켠다. | 켜지 않으면 재시작할 때 `TIME_WAIT` 때문에 `bind()`가 실패해요. (DESIGN.md 제안과 같음) |
